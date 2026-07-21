@@ -1,0 +1,158 @@
+import asyncio
+from time import perf_counter
+from typing import Any
+
+from sqlalchemy.orm import Session
+
+from app.execution.assertions import evaluate_assertions, extract_values
+from app.execution.context import deep_merge, render
+from app.execution.events import run_events
+from app.execution.protocols import ExecutionResult, execute_http, execute_ws
+from app.models import ApiDefinition, ApiTemplate, Project, StepRun, TestFlow, TestRun, utcnow
+
+
+def build_request_config(
+    api: ApiDefinition,
+    context: dict[str, Any],
+    request_override: dict[str, Any] | None = None,
+    template: ApiTemplate | None = None,
+) -> dict[str, Any]:
+    config = deep_merge(template.request if template else {}, api.request)
+    config = deep_merge(config, request_override or {})
+    return render(config, context)
+
+
+async def execute_api_once(
+    api: ApiDefinition,
+    context: dict[str, Any],
+    request_override: dict[str, Any] | None = None,
+    template: ApiTemplate | None = None,
+) -> ExecutionResult:
+    config = build_request_config(api, context, request_override, template)
+    if api.protocol == "http":
+        return await execute_http(config)
+    if api.protocol == "ws":
+        return await execute_ws(config)
+    raise ValueError(f"Unsupported protocol: {api.protocol}")
+
+
+async def execute_flow(session: Session, run_id: str) -> None:
+    run = session.get(TestRun, run_id)
+    if not run:
+        return
+    flow = session.get(TestFlow, run.flow_id)
+    if not flow:
+        run.status = "failed"
+        run.error = "Flow not found"
+        session.commit()
+        return
+    project = session.get(Project, flow.project_id)
+
+    run.status = "running"
+    run.started_at = utcnow()
+    context = deep_merge(project.variables if project else {}, flow.variables)
+    context = deep_merge(context, run.inputs)
+    # Keep the mutable working context separate so SQLAlchemy can detect JSON changes.
+    run.context = dict(context)
+    session.commit()
+    await run_events.publish(run.id, {"type": "run_started", "run_id": run.id})
+
+    try:
+        for position, step in enumerate(flow.steps):
+            if not step.get("enabled", True):
+                continue
+            await _execute_step(session, run, step, position, context)
+            run.context = dict(context)
+            session.commit()
+        run.status = "passed"
+    except Exception as exc:
+        run.status = "failed"
+        run.error = str(exc)
+    finally:
+        run.context = dict(context)
+        run.finished_at = utcnow()
+        session.commit()
+        await run_events.publish(
+            run.id,
+            {"type": "run_finished", "run_id": run.id, "status": run.status, "error": run.error},
+        )
+
+
+async def _execute_step(
+    session: Session,
+    run: TestRun,
+    step: dict[str, Any],
+    position: int,
+    context: dict[str, Any],
+) -> None:
+    api = session.get(ApiDefinition, step["api_id"])
+    if not api or api.project_id != session.get(TestFlow, run.flow_id).project_id:
+        raise ValueError(f"API not found in this project: {step['api_id']}")
+    template = session.get(ApiTemplate, api.template_id) if api.template_id else None
+
+    retry = step.get("retry", {})
+    max_attempts = max(1, int(retry.get("max_attempts", 1)))
+    interval_ms = max(0, int(retry.get("interval_ms", 0)))
+    backoff = max(1.0, float(retry.get("backoff_multiplier", 1)))
+    last_error: Exception | None = None
+
+    for attempt in range(1, max_attempts + 1):
+        started = perf_counter()
+        result: ExecutionResult | None = None
+        extracted: dict[str, Any] = {}
+        status = "passed"
+        error: str | None = None
+        try:
+            result = await execute_api_once(
+                api, context, step.get("request", {}), template=template
+            )
+            if (
+                api.protocol == "http"
+                and result.response.get("status_code", 0) >= 400
+                and not build_request_config(
+                    api, context, step.get("request", {}), template
+                ).get("allow_error_status", False)
+            ):
+                raise RuntimeError(f"HTTP returned {result.response['status_code']}")
+            evaluate_assertions(result.response, step.get("assertions", []))
+            extracted = extract_values(result.response, step.get("extractors", []))
+            context.update(extracted)
+        except Exception as exc:
+            status = "failed"
+            error = str(exc)
+            last_error = exc
+
+        duration_ms = (perf_counter() - started) * 1000
+        record = StepRun(
+            run_id=run.id,
+            step_id=step["id"],
+            step_name=step["name"],
+            position=position,
+            attempt=attempt,
+            status=status,
+            duration_ms=duration_ms,
+            request_snapshot=result.request if result else {},
+            response_snapshot=result.response if result else None,
+            extracted=extracted,
+            error=error,
+        )
+        session.add(record)
+        session.commit()
+        await run_events.publish(
+            run.id,
+            {
+                "type": "step_finished",
+                "run_id": run.id,
+                "step_id": step["id"],
+                "attempt": attempt,
+                "status": status,
+                "error": error,
+            },
+        )
+        if status == "passed":
+            return
+        if attempt < max_attempts and interval_ms:
+            await asyncio.sleep((interval_ms / 1000) * (backoff ** (attempt - 1)))
+
+    assert last_error is not None
+    raise last_error
