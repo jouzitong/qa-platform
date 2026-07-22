@@ -1,4 +1,12 @@
-import type { ApiDefinition, ApiTemplate, Project, TestFlow, TestRun } from '../types'
+import type {
+  ApiDefinition,
+  ApiTemplate,
+  AssertionDefinition,
+  AssertionProfile,
+  Project,
+  TestFlow,
+  TestRun,
+} from '../types'
 
 const API_ROOT = import.meta.env.VITE_API_ROOT || '/api/v1'
 
@@ -33,10 +41,42 @@ export const api = {
       request<ApiDefinition>(`/apis/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
     remove: (id: string) => request<void>(`/apis/${id}`, { method: 'DELETE' }),
     execute: (id: string, inputs: object, requestOverride: object) =>
-      request<{ request: object; response: object }>(`/apis/${id}/execute`, {
+      request<{ request: object; response: object; validation: object }>(`/apis/${id}/execute`, {
         method: 'POST',
         body: JSON.stringify({ inputs, request: requestOverride }),
       }),
+  },
+  assertionDefinitions: {
+    list: (projectId?: string) =>
+      request<AssertionDefinition[]>(
+        `/assertion-definitions${projectId ? `?project_id=${projectId}` : ''}`,
+      ),
+    create: (payload: Partial<AssertionDefinition>) =>
+      request<AssertionDefinition>('/assertion-definitions', {
+        method: 'POST', body: JSON.stringify(payload),
+      }),
+    update: (id: string, payload: Partial<AssertionDefinition>) =>
+      request<AssertionDefinition>(`/assertion-definitions/${id}`, {
+        method: 'PATCH', body: JSON.stringify(payload),
+      }),
+    remove: (id: string) =>
+      request<void>(`/assertion-definitions/${id}`, { method: 'DELETE' }),
+  },
+  assertionProfiles: {
+    list: (projectId?: string) =>
+      request<AssertionProfile[]>(
+        `/assertion-profiles${projectId ? `?project_id=${projectId}` : ''}`,
+      ),
+    create: (payload: Partial<AssertionProfile>) =>
+      request<AssertionProfile>('/assertion-profiles', {
+        method: 'POST', body: JSON.stringify(payload),
+      }),
+    update: (id: string, payload: Partial<AssertionProfile>) =>
+      request<AssertionProfile>(`/assertion-profiles/${id}`, {
+        method: 'PATCH', body: JSON.stringify(payload),
+      }),
+    remove: (id: string) =>
+      request<void>(`/assertion-profiles/${id}`, { method: 'DELETE' }),
   },
   templates: {
     list: (projectId?: string) =>

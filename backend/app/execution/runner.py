@@ -4,10 +4,11 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.execution.assertions import evaluate_assertions, extract_values
+from app.execution.assertions import AssertionFailure, extract_values
 from app.execution.context import deep_merge, render
 from app.execution.events import run_events
 from app.execution.protocols import ExecutionResult, execute_http, execute_ws
+from app.execution.validation import validate_api_response
 from app.models import ApiDefinition, ApiTemplate, Project, StepRun, TestFlow, TestRun, utcnow
 
 
@@ -100,21 +101,34 @@ async def _execute_step(
         started = perf_counter()
         result: ExecutionResult | None = None
         extracted: dict[str, Any] = {}
+        assertion_results: list[dict[str, Any]] = []
         status = "passed"
         error: str | None = None
         try:
             result = await execute_api_once(
                 api, context, step.get("request", {}), template=template
             )
-            if (
-                api.protocol == "http"
-                and result.response.get("status_code", 0) >= 400
-                and not build_request_config(
-                    api, context, step.get("request", {}), template
-                ).get("allow_error_status", False)
-            ):
-                raise RuntimeError(f"HTTP returned {result.response['status_code']}")
-            evaluate_assertions(result.response, step.get("assertions", []))
+            request_config = build_request_config(
+                api, context, step.get("request", {}), template
+            )
+            validation = validate_api_response(
+                session,
+                api,
+                request=request_config,
+                response=result.response,
+                context=context,
+                step_assertions=step.get("assertions", []),
+                step_disabled_assertion_ids=step.get("disabled_assertion_ids", []),
+                allow_error_status=bool(request_config.get("allow_error_status", False)),
+            )
+            assertion_results = validation["results"]
+            if not validation["passed"]:
+                failures = [
+                    item["message"]
+                    for item in assertion_results
+                    if not item["passed"] and item["severity"] == "error"
+                ]
+                raise AssertionFailure("; ".join(failures))
             extracted = extract_values(result.response, step.get("extractors", []))
             context.update(extracted)
         except Exception as exc:
@@ -134,6 +148,7 @@ async def _execute_step(
             request_snapshot=result.request if result else {},
             response_snapshot=result.response if result else None,
             extracted=extracted,
+            assertion_results=assertion_results,
             error=error,
         )
         session.add(record)

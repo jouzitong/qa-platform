@@ -29,22 +29,26 @@ class ProjectRead(ProjectCreate, ORMModel):
 class ApiCreate(BaseModel):
     project_id: str
     template_id: str | None = None
+    assertion_profile_id: str | None = None
     name: str = Field(min_length=1, max_length=120)
     protocol: Literal["http", "ws"] = "http"
     description: str = ""
     request: dict[str, Any] = Field(default_factory=dict)
     parameters: list[dict[str, Any]] = Field(default_factory=list)
     examples: list[dict[str, Any]] = Field(default_factory=list)
+    response_variants: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ApiUpdate(BaseModel):
     template_id: str | None = None
+    assertion_profile_id: str | None = None
     name: str | None = Field(default=None, min_length=1, max_length=120)
     protocol: Literal["http", "ws"] | None = None
     description: str | None = None
     request: dict[str, Any] | None = None
     parameters: list[dict[str, Any]] | None = None
     examples: list[dict[str, Any]] | None = None
+    response_variants: list[dict[str, Any]] | None = None
 
 
 class ApiRead(ApiCreate, ORMModel):
@@ -79,6 +83,57 @@ class ApiTemplateRead(ApiTemplateCreate, ORMModel):
     updated_at: datetime
 
 
+class AssertionDefinitionCreate(BaseModel):
+    project_id: str
+    name: str = Field(min_length=1, max_length=120)
+    engine: Literal["path", "json_schema", "expression"] = "path"
+    description: str = ""
+    config: dict[str, Any] = Field(default_factory=dict)
+    default_params: dict[str, Any] = Field(default_factory=dict)
+    severity: Literal["error", "warning"] = "error"
+    message: str = ""
+
+
+class AssertionDefinitionUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    engine: Literal["path", "json_schema", "expression"] | None = None
+    description: str | None = None
+    config: dict[str, Any] | None = None
+    default_params: dict[str, Any] | None = None
+    severity: Literal["error", "warning"] | None = None
+    message: str | None = None
+
+
+class AssertionDefinitionRead(AssertionDefinitionCreate, ORMModel):
+    id: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class AssertionProfileCreate(BaseModel):
+    project_id: str
+    name: str = Field(min_length=1, max_length=120)
+    protocol: Literal["http", "ws"] = "http"
+    description: str = ""
+    is_default: bool = False
+    bindings: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class AssertionProfileUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    protocol: Literal["http", "ws"] | None = None
+    description: str | None = None
+    is_default: bool | None = None
+    bindings: list[dict[str, Any]] | None = None
+
+
+class AssertionProfileRead(AssertionProfileCreate, ORMModel):
+    id: str
+    usage_count: int
+    created_at: datetime
+    updated_at: datetime
+
+
 class RetryPolicy(BaseModel):
     max_attempts: int = Field(default=1, ge=1, le=10)
     interval_ms: int = Field(default=0, ge=0, le=300_000)
@@ -92,6 +147,7 @@ class FlowStep(BaseModel):
     enabled: bool = True
     request: dict[str, Any] = Field(default_factory=dict)
     assertions: list[dict[str, Any]] = Field(default_factory=list)
+    disabled_assertion_ids: list[str] = Field(default_factory=list)
     extractors: list[dict[str, Any]] = Field(default_factory=list)
     retry: RetryPolicy = Field(default_factory=RetryPolicy)
 
@@ -133,6 +189,7 @@ class StepRunRead(ORMModel):
     request_snapshot: dict[str, Any]
     response_snapshot: dict[str, Any] | None
     extracted: dict[str, Any]
+    assertion_results: list[dict[str, Any]]
     error: str | None
     created_at: datetime
 

@@ -1,14 +1,18 @@
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.common import get_or_404
 from app.database import get_session
 from app.execution.context import deep_merge
+from app.execution.expression import ExpressionError, parse_expression
 from app.execution.runner import execute_api_once
-from app.models import ApiDefinition, ApiTemplate, Project, TestFlow
+from app.execution.validation import validate_api_response
+from app.models import ApiDefinition, ApiTemplate, AssertionProfile, Project, TestFlow
 from app.schemas import ApiCreate, ApiRead, ApiUpdate, ExecuteRequest
 
 router = APIRouter(prefix="/apis", tags=["apis"])
@@ -30,6 +34,56 @@ def _validate_template(
     return template
 
 
+def _validate_profile(
+    session: Session,
+    project_id: str,
+    protocol: str,
+    profile_id: str | None,
+) -> AssertionProfile | None:
+    if not profile_id:
+        return None
+    profile = get_or_404(session, AssertionProfile, profile_id, "Assertion profile")
+    if profile.project_id != project_id:
+        raise HTTPException(status_code=422, detail="Assertion profile belongs to another project")
+    if profile.protocol != protocol:
+        raise HTTPException(
+            status_code=422, detail="API and assertion profile protocols must match"
+        )
+    return profile
+
+
+def _validate_variants(
+    session: Session,
+    project_id: str,
+    protocol: str,
+    variants: list[dict[str, Any]],
+) -> None:
+    names: set[str] = set()
+    for variant in variants:
+        name = str(variant.get("name", "")).strip()
+        if not name or name in names:
+            raise HTTPException(status_code=422, detail="Response variants require unique names")
+        names.add(name)
+        try:
+            parse_expression(str(variant.get("match", "")))
+            if variant.get("schema") is not None:
+                Draft202012Validator.check_schema(variant["schema"])
+        except (ExpressionError, SchemaError) as exc:
+            raise HTTPException(status_code=422, detail=f"Variant {name}: {exc}") from None
+        for profile_id in variant.get("assertion_profile_ids", []):
+            _validate_profile(session, project_id, protocol, str(profile_id))
+
+
+def _default_profile(session: Session, project_id: str, protocol: str) -> AssertionProfile | None:
+    return session.scalar(
+        select(AssertionProfile).where(
+            AssertionProfile.project_id == project_id,
+            AssertionProfile.protocol == protocol,
+            AssertionProfile.is_default.is_(True),
+        )
+    )
+
+
 @router.get("", response_model=list[ApiRead])
 def list_apis(
     project_id: str | None = Query(default=None), session: Session = Depends(get_session)
@@ -44,7 +98,18 @@ def list_apis(
 def create_api(payload: ApiCreate, session: Session = Depends(get_session)) -> ApiDefinition:
     get_or_404(session, Project, payload.project_id, "Project")
     _validate_template(session, payload.project_id, payload.protocol, payload.template_id)
-    definition = ApiDefinition(**payload.model_dump())
+    profile_id = payload.assertion_profile_id
+    if "assertion_profile_id" not in payload.model_fields_set:
+        profile_id = (_default_profile(session, payload.project_id, payload.protocol) or None)
+        profile_id = profile_id.id if profile_id else None
+    _validate_profile(session, payload.project_id, payload.protocol, profile_id)
+    _validate_variants(
+        session, payload.project_id, payload.protocol, payload.response_variants
+    )
+    definition = ApiDefinition(
+        **payload.model_dump(exclude={"assertion_profile_id"}),
+        assertion_profile_id=profile_id,
+    )
     session.add(definition)
     session.commit()
     session.refresh(definition)
@@ -64,8 +129,18 @@ def update_api(
     values = payload.model_dump(exclude_unset=True)
     target_protocol = values.get("protocol", definition.protocol)
     target_template_id = values.get("template_id", definition.template_id)
+    target_profile_id = values.get("assertion_profile_id", definition.assertion_profile_id)
     _validate_template(
         session, definition.project_id, target_protocol, target_template_id
+    )
+    _validate_profile(
+        session, definition.project_id, target_protocol, target_profile_id
+    )
+    _validate_variants(
+        session,
+        definition.project_id,
+        target_protocol,
+        values.get("response_variants", definition.response_variants),
     )
     for field, value in values.items():
         setattr(definition, field, value)
@@ -100,4 +175,16 @@ async def execute_api(
         )
     except Exception as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
-    return {"request": result.request, "response": result.response}
+    request_config = deep_merge(
+        definition.template.request if definition.template else {}, definition.request
+    )
+    request_config = deep_merge(request_config, payload.request)
+    validation = validate_api_response(
+        session,
+        definition,
+        request=request_config,
+        response=result.response,
+        context=context,
+        allow_error_status=bool(request_config.get("allow_error_status", False)),
+    )
+    return {"request": result.request, "response": result.response, "validation": validation}

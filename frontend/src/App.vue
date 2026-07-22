@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Connection, DataAnalysis, Files, Guide, Monitor } from '@element-plus/icons-vue'
+import { CircleCheck, Connection, DataAnalysis, Files, Guide, Monitor } from '@element-plus/icons-vue'
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 
@@ -10,6 +10,7 @@ const menu = [
   { path: '/', label: '工作台', icon: Monitor },
   { path: '/projects', label: '项目', icon: Files },
   { path: '/apis', label: 'API 管理', icon: Connection },
+  { path: '/assertions', label: '断言管理', icon: CircleCheck },
   { path: '/flows', label: '测试流程', icon: Guide },
   { path: '/runs', label: '执行记录', icon: DataAnalysis },
 ]

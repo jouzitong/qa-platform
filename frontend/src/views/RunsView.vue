@@ -97,6 +97,13 @@ onMounted(load)
         <el-collapse-item v-for="step in selected.step_runs" :key="step.id" :name="step.id">
           <template #title><span class="step-number" style="margin-right: 10px">{{ step.position + 1 }}</span><strong>{{ step.step_name }}</strong><el-tag :type="step.status === 'passed' ? 'success' : 'danger'" size="small" style="margin-left: 10px">attempt {{ step.attempt }} · {{ step.status }}</el-tag><span class="muted" style="margin-left: auto; margin-right: 12px">{{ step.duration_ms.toFixed(0) }} ms</span></template>
           <div class="two-col"><div><p class="muted">请求</p><pre class="code-block">{{ pretty(step.request_snapshot) }}</pre></div><div><p class="muted">响应</p><pre class="code-block">{{ pretty(step.response_snapshot || { error: step.error }) }}</pre></div></div>
+          <div v-if="step.assertion_results.length" class="assertion-results">
+            <p class="muted">断言结果</p>
+            <div v-for="result in step.assertion_results" :key="result.assertion_id" class="assertion-result">
+              <el-tag :type="result.passed ? 'success' : result.severity === 'warning' ? 'warning' : 'danger'" size="small">{{ result.passed ? '通过' : result.severity === 'warning' ? '警告' : '失败' }}</el-tag>
+              <strong>{{ result.name }}</strong><span class="muted">{{ result.message }}</span>
+            </div>
+          </div>
           <p v-if="Object.keys(step.extracted).length" class="muted" style="margin-top: 10px">提取值：<code>{{ pretty(step.extracted) }}</code></p>
         </el-collapse-item>
       </el-collapse>

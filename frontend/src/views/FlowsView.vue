@@ -13,6 +13,7 @@ interface EditableStep {
   enabled: boolean
   request: string
   assertions: string
+  disabled_assertion_ids: string
   extractors: string
   max_attempts: number
   interval_ms: number
@@ -40,7 +41,8 @@ function newStep(): EditableStep {
   return {
     id: `step-${crypto.randomUUID().slice(0, 8)}`, name: '', api_id: '', enabled: true,
     request: '{}', assertions: '[\n  { "source": "status_code", "operator": "equals", "expected": 200 }\n]',
-    extractors: '[]', max_attempts: 1, interval_ms: 0, backoff_multiplier: 1,
+    disabled_assertion_ids: '[]', extractors: '[]', max_attempts: 1,
+    interval_ms: 0, backoff_multiplier: 1,
   }
 }
 
@@ -57,7 +59,9 @@ function openEdit(row: TestFlow) {
   form.variables = pretty(row.variables)
   form.steps = row.steps.map((step) => ({
     id: step.id, name: step.name, api_id: step.api_id, enabled: step.enabled,
-    request: pretty(step.request), assertions: pretty(step.assertions), extractors: pretty(step.extractors),
+    request: pretty(step.request), assertions: pretty(step.assertions),
+    disabled_assertion_ids: pretty(step.disabled_assertion_ids),
+    extractors: pretty(step.extractors),
     max_attempts: step.retry.max_attempts, interval_ms: step.retry.interval_ms,
     backoff_multiplier: step.retry.backoff_multiplier,
   }))
@@ -76,6 +80,9 @@ function serializeStep(step: EditableStep): FlowStep {
     id: step.id, name: step.name, api_id: step.api_id, enabled: step.enabled,
     request: parseJson<Record<string, unknown>>(step.request, `${step.name} 请求覆盖`),
     assertions: parseJson<Record<string, unknown>[]>(step.assertions, `${step.name} 断言`),
+    disabled_assertion_ids: parseJson<string[]>(
+      step.disabled_assertion_ids, `${step.name} 禁用断言`,
+    ),
     extractors: parseJson<Record<string, unknown>[]>(step.extractors, `${step.name} 提取器`),
     retry: { max_attempts: step.max_attempts, interval_ms: step.interval_ms, backoff_multiplier: step.backoff_multiplier },
   }
@@ -150,7 +157,7 @@ onMounted(async () => {
         </div>
         <el-tabs type="border-card">
           <el-tab-pane label="请求覆盖"><el-input v-model="step.request" class="json-input" type="textarea" :rows="6" /></el-tab-pane>
-          <el-tab-pane label="断言"><el-input v-model="step.assertions" class="json-input" type="textarea" :rows="6" /></el-tab-pane>
+          <el-tab-pane label="断言"><el-input v-model="step.assertions" class="json-input" type="textarea" :rows="5" /><p class="muted" style="margin: 8px 0">禁用继承断言 ID：</p><el-input v-model="step.disabled_assertion_ids" class="json-input" type="textarea" :rows="2" /></el-tab-pane>
           <el-tab-pane label="提取器"><el-input v-model="step.extractors" class="json-input" type="textarea" :rows="6" /><p class="muted">示例：[{ "name": "token", "source": "body.data.token" }]</p></el-tab-pane>
           <el-tab-pane label="失败重试"><div class="retry-fields"><el-form-item label="最多尝试"><el-input-number v-model="step.max_attempts" :min="1" :max="10" /></el-form-item><el-form-item label="间隔（ms）"><el-input-number v-model="step.interval_ms" :min="0" /></el-form-item><el-form-item label="退避倍数"><el-input-number v-model="step.backoff_multiplier" :min="1" :step="0.5" /></el-form-item></div></el-tab-pane>
         </el-tabs>

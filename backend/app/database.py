@@ -41,6 +41,14 @@ def ensure_schema_compatibility() -> None:
             connection.exec_driver_sql(
                 "ALTER TABLE api_definitions ADD COLUMN template_id VARCHAR(36)"
             )
+        if "assertion_profile_id" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE api_definitions ADD COLUMN assertion_profile_id VARCHAR(36)"
+            )
+        if "response_variants" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE api_definitions ADD COLUMN response_variants JSON DEFAULT '[]'"
+            )
         if "api_templates" in inspector.get_table_names():
             template_columns = {
                 column["name"] for column in inspector.get_columns("api_templates")
@@ -52,4 +60,12 @@ def ensure_schema_compatibility() -> None:
             if "examples" not in template_columns:
                 connection.exec_driver_sql(
                     "ALTER TABLE api_templates ADD COLUMN examples JSON DEFAULT '[]'"
+                )
+        if "step_runs" in inspector.get_table_names():
+            step_run_columns = {
+                column["name"] for column in inspector.get_columns("step_runs")
+            }
+            if "assertion_results" not in step_run_columns:
+                connection.exec_driver_sql(
+                    "ALTER TABLE step_runs ADD COLUMN assertion_results JSON DEFAULT '[]'"
                 )

@@ -3,12 +3,13 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 
 import { api } from '../api/client'
-import type { ApiDefinition, ApiTemplate, Project } from '../types'
+import type { ApiDefinition, ApiTemplate, AssertionProfile, Project } from '../types'
 import { parseJson, pretty } from '../utils'
 
 const projects = ref<Project[]>([])
 const definitions = ref<ApiDefinition[]>([])
 const templates = ref<ApiTemplate[]>([])
+const profiles = ref<AssertionProfile[]>([])
 const projectId = ref('')
 const activeTab = ref<'apis' | 'templates'>('apis')
 const dialog = ref(false)
@@ -20,8 +21,9 @@ const executing = ref<ApiDefinition | null>(null)
 const executionResult = ref<object | null>(null)
 const form = reactive({
   name: '', protocol: 'http' as 'http' | 'ws', template_id: null as string | null,
+  assertion_profile_id: undefined as string | null | undefined,
   description: '', request: '{}',
-  parameters: '[]', examples: '[]',
+  parameters: '[]', examples: '[]', response_variants: '[]',
 })
 const templateForm = reactive({
   name: '', protocol: 'http' as 'http' | 'ws', description: '', request: '{}',
@@ -31,12 +33,16 @@ const executeForm = reactive({ inputs: '{}', request: '{}' })
 const availableTemplates = computed(() =>
   templates.value.filter((template) => template.protocol === form.protocol),
 )
+const availableProfiles = computed(() =>
+  profiles.value.filter((profile) => profile.protocol === form.protocol),
+)
 
 async function load() {
   if (!projectId.value) { definitions.value = []; templates.value = []; return }
   try {
-    ;[definitions.value, templates.value] = await Promise.all([
+    ;[definitions.value, templates.value, profiles.value] = await Promise.all([
       api.definitions.list(projectId.value), api.templates.list(projectId.value),
+      api.assertionProfiles.list(projectId.value),
     ])
   }
   catch (error) { ElMessage.error((error as Error).message) }
@@ -90,19 +96,20 @@ function effectiveParameterCount(definition: ApiDefinition) {
 function openCreate() {
   if (!projectId.value) { ElMessage.warning('请先选择项目'); return }
   editingId.value = ''
-  Object.assign(form, { name: '', protocol: 'http', template_id: null, description: '', request: pretty(defaultRequest('http')), parameters: '[]', examples: '[]' })
+  Object.assign(form, { name: '', protocol: 'http', template_id: null, assertion_profile_id: undefined, description: '', request: pretty(defaultRequest('http')), parameters: '[]', examples: '[]', response_variants: '[]' })
   dialog.value = true
 }
 
 function openEdit(row: ApiDefinition) {
   editingId.value = row.id
-  Object.assign(form, { name: row.name, protocol: row.protocol, template_id: row.template_id, description: row.description, request: pretty(row.request), parameters: pretty(row.parameters), examples: pretty(row.examples) })
+  Object.assign(form, { name: row.name, protocol: row.protocol, template_id: row.template_id, assertion_profile_id: row.assertion_profile_id, description: row.description, request: pretty(row.request), parameters: pretty(row.parameters), examples: pretty(row.examples), response_variants: pretty(row.response_variants) })
   dialog.value = true
 }
 
 function switchProtocol(protocol: 'http' | 'ws') {
   form.protocol = protocol
   form.template_id = null
+  form.assertion_profile_id = undefined
   if (!editingId.value) form.request = pretty(defaultRequest(protocol))
 }
 
@@ -120,14 +127,17 @@ function selectTemplate(templateId: string | null) {
 
 async function save() {
   try {
-    const payload = {
+    const payload: Record<string, unknown> = {
       project_id: projectId.value, name: form.name, protocol: form.protocol,
       template_id: form.template_id,
       description: form.description,
       request: parseJson<Record<string, unknown>>(form.request, '请求配置'),
       parameters: parseJson<Record<string, unknown>[]>(form.parameters, '参数说明'),
       examples: parseJson<Record<string, unknown>[]>(form.examples, '参考案例'),
+      response_variants: parseJson<Record<string, unknown>[]>(form.response_variants, '响应分支'),
     }
+    if (editingId.value || form.assertion_profile_id !== undefined)
+      payload.assertion_profile_id = form.assertion_profile_id
     if (editingId.value) await api.definitions.update(editingId.value, payload)
     else await api.definitions.create(payload)
     dialog.value = false
@@ -189,6 +199,10 @@ function openExecute(row: ApiDefinition) {
   executeDialog.value = true
 }
 
+function findProfile(profileId: string | null) {
+  return profiles.value.find((profile) => profile.id === profileId)
+}
+
 async function execute() {
   if (!executing.value) return
   try {
@@ -226,6 +240,7 @@ onMounted(async () => {
       <el-table-column label="协议" width="92"><template #default="scope"><el-tag :type="scope.row.protocol === 'http' ? 'success' : 'warning'" effect="dark">{{ scope.row.protocol.toUpperCase() }}</el-tag></template></el-table-column>
       <el-table-column prop="name" label="名称" min-width="160" />
       <el-table-column label="模板" min-width="140"><template #default="scope"><el-tag v-if="findTemplate(scope.row.template_id)" effect="plain">{{ findTemplate(scope.row.template_id)?.name }}</el-tag><span v-else class="muted">无</span></template></el-table-column>
+      <el-table-column label="断言集合" min-width="150"><template #default="scope"><el-tag v-if="findProfile(scope.row.assertion_profile_id)" type="success" effect="plain">{{ findProfile(scope.row.assertion_profile_id)?.name }}</el-tag><span v-else class="muted">无</span></template></el-table-column>
       <el-table-column prop="description" label="功能说明" min-width="190" show-overflow-tooltip />
       <el-table-column label="有效请求目标" min-width="280" show-overflow-tooltip><template #default="scope"><code>{{ requestTarget(scope.row) }}</code></template></el-table-column>
       <el-table-column label="有效参数" width="90"><template #default="scope">{{ effectiveParameterCount(scope.row) }}</template></el-table-column>
@@ -260,6 +275,12 @@ onMounted(async () => {
         </el-select>
         <div class="muted">模板配置会作为基础值，当前 API 的请求配置只需填写差异。</div>
       </el-form-item>
+      <el-form-item label="默认断言集合">
+        <el-select v-model="form.assertion_profile_id" clearable placeholder="自动使用当前协议的默认集合" style="width: 100%">
+          <el-option v-for="item in availableProfiles" :key="item.id" :label="`${item.name}${item.is_default ? '（默认）' : ''}`" :value="item.id" />
+        </el-select>
+        <div class="muted">新建 API 不选择时自动绑定默认集合；绑定后，集合内容的修改会实时生效。</div>
+      </el-form-item>
       <el-alert v-if="findTemplate(form.template_id)" type="success" :closable="false" show-icon>
         <template #title>继承自 {{ findTemplate(form.template_id)?.name }}</template>
         <pre class="template-preview">{{ pretty(findTemplate(form.template_id)?.request) }}</pre>
@@ -269,6 +290,7 @@ onMounted(async () => {
         <el-tab-pane label="API 请求覆盖"><el-input v-model="form.request" class="json-input" type="textarea" :rows="12" /><p class="muted">合并优先级：模板配置 &lt; API 覆盖。使用模板的 API 推荐通过 <code>path</code> 声明路径。</p></el-tab-pane>
         <el-tab-pane label="参数说明"><el-input v-model="form.parameters" class="json-input" type="textarea" :rows="12" /><p class="muted">示例：[{ "name": "symbol", "in": "query", "required": true, "description": "交易对" }]</p></el-tab-pane>
         <el-tab-pane label="参考案例"><el-input v-model="form.examples" class="json-input" type="textarea" :rows="12" /></el-tab-pane>
+        <el-tab-pane label="响应分支"><el-input v-model="form.response_variants" class="json-input" type="textarea" :rows="12" /><p class="muted">每个分支可配置 <code>name</code>、<code>match</code>、<code>schema</code>、<code>assertion_profile_ids</code> 和局部 <code>assertions</code>。</p></el-tab-pane>
       </el-tabs>
     </el-form>
     <template #footer><el-button @click="dialog = false">取消</el-button><el-button type="primary" :disabled="!form.name" @click="save">保存</el-button></template>

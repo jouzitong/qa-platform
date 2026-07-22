@@ -31,6 +31,12 @@ class Project(TimestampMixin, Base):
 
     apis: Mapped[list["ApiDefinition"]] = relationship(cascade="all, delete-orphan")
     api_templates: Mapped[list["ApiTemplate"]] = relationship(cascade="all, delete-orphan")
+    assertion_definitions: Mapped[list["AssertionDefinition"]] = relationship(
+        cascade="all, delete-orphan"
+    )
+    assertion_profiles: Mapped[list["AssertionProfile"]] = relationship(
+        cascade="all, delete-orphan"
+    )
     flows: Mapped[list["TestFlow"]] = relationship(cascade="all, delete-orphan")
 
 
@@ -66,14 +72,63 @@ class ApiDefinition(TimestampMixin, Base):
     template_id: Mapped[str | None] = mapped_column(
         ForeignKey("api_templates.id", ondelete="RESTRICT"), nullable=True, index=True
     )
+    assertion_profile_id: Mapped[str | None] = mapped_column(
+        ForeignKey("assertion_profiles.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
     name: Mapped[str] = mapped_column(String(120), index=True)
     protocol: Mapped[str] = mapped_column(String(10), default="http")
     description: Mapped[str] = mapped_column(Text, default="")
     request: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     parameters: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     examples: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    response_variants: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
 
     template: Mapped[ApiTemplate | None] = relationship(back_populates="apis")
+    assertion_profile: Mapped["AssertionProfile | None"] = relationship(
+        back_populates="apis"
+    )
+
+
+class AssertionDefinition(TimestampMixin, Base):
+    __tablename__ = "assertion_definitions"
+    __table_args__ = (
+        UniqueConstraint("project_id", "name", name="uq_assertion_definition_project_name"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(120), index=True)
+    engine: Mapped[str] = mapped_column(String(20), default="path")
+    description: Mapped[str] = mapped_column(Text, default="")
+    config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    default_params: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    severity: Mapped[str] = mapped_column(String(10), default="error")
+    message: Mapped[str] = mapped_column(Text, default="")
+
+
+class AssertionProfile(TimestampMixin, Base):
+    __tablename__ = "assertion_profiles"
+    __table_args__ = (
+        UniqueConstraint("project_id", "name", name="uq_assertion_profile_project_name"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(120), index=True)
+    protocol: Mapped[str] = mapped_column(String(10), default="http")
+    description: Mapped[str] = mapped_column(Text, default="")
+    is_default: Mapped[bool] = mapped_column(default=False, index=True)
+    bindings: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+
+    apis: Mapped[list[ApiDefinition]] = relationship(back_populates="assertion_profile")
+
+    @property
+    def usage_count(self) -> int:
+        return len(self.apis)
 
 
 class TestFlow(TimestampMixin, Base):
@@ -125,5 +180,6 @@ class StepRun(Base):
     request_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     response_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     extracted: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    assertion_results: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

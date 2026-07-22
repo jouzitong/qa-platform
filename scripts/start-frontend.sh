@@ -18,7 +18,7 @@ if [[ ! -d "${FRONTEND_DIR}/node_modules" ]]; then
 fi
 
 FRONTEND_HOST="${FRONTEND_HOST:-127.0.0.1}"
-FRONTEND_PORT="${FRONTEND_PORT:-5173}"
+FRONTEND_PORT="${FRONTEND_PORT:-7173}"
 
 echo "[qa-platform] 启动前端：http://${FRONTEND_HOST}:${FRONTEND_PORT}"
 cd "${FRONTEND_DIR}"

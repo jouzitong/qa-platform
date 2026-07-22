@@ -10,7 +10,8 @@
 - 流程编排：按顺序组合 API，支持步骤开关、请求覆盖和拖动式顺序调整（当前为上移/下移）。
 - 上下文：按 `项目变量 < 流程变量 < 本次输入 < 步骤提取值` 的优先级合并。
 - 模板：在 URL、请求头、查询参数、Body、WS 消息中使用 `{{ variable.path }}`。
-- 校验与提取：支持响应路径断言，并将响应值提取给后续步骤。
+- 可复用断言：项目级原子断言与断言集合，支持按 HTTP/WS 设置默认集合，新 API 自动绑定。
+- 校验与提取：支持路径比较、JSON Schema、安全 Python 风格表达式、响应分支，并将响应值提取给后续步骤。
 - 失败重试：配置最大尝试次数、间隔和指数退避倍数，每次尝试单独留痕。
 - 运行观察：保存请求/响应快照，敏感请求头脱敏；通过 WebSocket 推送运行事件。
 - 工程化：后端测试、前端类型检查/构建、GitHub Actions、Docker Compose、CodeGraph 索引规则。
@@ -134,7 +135,35 @@ HTTP API 请求配置：
 
 执行时按照 `模板配置 < API 覆盖 < 流程步骤覆盖/临时执行覆盖` 深度合并。`url` 字段优先；未提供 `url` 时，执行器会自动拼接模板的 `base_url` 与 API 的 `path`。修改模板后，所有引用 API 会在下次执行时使用新配置。
 
-步骤断言与提取器：
+断言定义可以选择三种引擎：
+
+- `path`：通用路径与操作符比较，兼容流程中已有的内联断言。
+- `json_schema`：使用 JSON Schema Draft 2020-12 校验响应结构。
+- `expression`：用于跨字段或带参数的业务判断，例如 `response.body['min'] <= response.body['max']`。
+
+表达式只支持比较、布尔逻辑、简单算术、字典/数组访问以及 `len`、`contains`、`exists`、`match`、`starts_with`、`ends_with`、`lower`、`upper` 等白名单函数。运行时使用 AST 白名单和自定义解释器，不调用 Python `eval`/`exec`，也不允许导入、赋值、推导式或任意函数调用。
+
+响应分支用于声明同一个 API 的多种合法返回：
+
+```json
+[
+  {
+    "name": "not-found",
+    "match": "response.status_code == 404",
+    "schema": {
+      "type": "object",
+      "required": ["code"]
+    },
+    "assertion_profile_ids": ["profile-id"],
+    "disabled_assertion_ids": [],
+    "assertions": []
+  }
+]
+```
+
+有响应分支时，匹配到的预期 4xx 响应可以通过；没有配置响应分支时，系统保留 HTTP 状态码小于 400 的基础检查。所有规则都会执行并形成结构化结果，`warning` 失败不会导致步骤失败。
+
+步骤局部断言与提取器：
 
 ```json
 {
@@ -142,6 +171,7 @@ HTTP API 请求配置：
     { "source": "status_code", "operator": "equals", "expected": 200 },
     { "source": "body.success", "operator": "equals", "expected": true }
   ],
+  "disabled_assertion_ids": ["project-assertion-id"],
   "extractors": [
     { "name": "access_token", "source": "body.data.token" }
   ],
@@ -160,9 +190,11 @@ HTTP API 请求配置：
 - `Project`：项目及默认变量。
 - `ApiTemplate`：项目级 HTTP/WS 公共配置，可被多个 API 实时引用。
 - `ApiDefinition`：协议、请求定义、参数说明与案例。
+- `AssertionDefinition`：项目级原子断言、引擎配置、默认参数和严重级别。
+- `AssertionProfile`：按协议组合原子断言，可作为项目默认集合。
 - `TestFlow`：流程变量及有序步骤定义。
 - `TestRun`：一次运行的输入、最终上下文和状态。
-- `StepRun`：步骤的单次尝试、耗时、快照、提取值和错误。
+- `StepRun`：步骤的单次尝试、耗时、快照、完整断言结果、提取值和错误。
 
 ## 自动化部署扩展路线
 
