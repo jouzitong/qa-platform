@@ -3,6 +3,9 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 
 import { api } from '../api/client'
+import ApiExamplesEditor from '../components/ApiExamplesEditor.vue'
+import ApiParametersEditor from '../components/ApiParametersEditor.vue'
+import ApiRequestEditor from '../components/ApiRequestEditor.vue'
 import type { ApiDefinition, ApiTemplate, AssertionProfile, Project } from '../types'
 import { parseJson, pretty } from '../utils'
 
@@ -19,6 +22,7 @@ const editingId = ref('')
 const editingTemplateId = ref('')
 const executing = ref<ApiDefinition | null>(null)
 const executionResult = ref<object | null>(null)
+const pathParameterNames = ref<string[]>([])
 const form = reactive({
   name: '', protocol: 'http' as 'http' | 'ws', template_id: null as string | null,
   assertion_profile_id: undefined as string | null | undefined,
@@ -36,6 +40,20 @@ const availableTemplates = computed(() =>
 const availableProfiles = computed(() =>
   profiles.value.filter((profile) => profile.protocol === form.protocol),
 )
+const parameterItems = computed<Record<string, unknown>[]>({
+  get: () => {
+    try { return JSON.parse(form.parameters) as Record<string, unknown>[] }
+    catch { return [] }
+  },
+  set: (value) => { form.parameters = pretty(value) },
+})
+const exampleItems = computed<Record<string, unknown>[]>({
+  get: () => {
+    try { return JSON.parse(form.examples) as Record<string, unknown>[] }
+    catch { return [] }
+  },
+  set: (value) => { form.examples = pretty(value) },
+})
 
 async function load() {
   if (!projectId.value) { definitions.value = []; templates.value = []; return }
@@ -123,6 +141,22 @@ function selectTemplate(templateId: string | null) {
       ? { method: 'GET', path: '/health' }
       : { path: '/', messages: [{ type: 'ping' }], receive_count: 1 })
   }
+}
+
+function syncPathParameters(names: string[]) {
+  pathParameterNames.value = names
+  if (!names.length) return
+  const current = [...parameterItems.value]
+  let changed = false
+  for (const name of names) {
+    if (current.some((item) => item.name === name && item.in === 'path')) continue
+    current.push({
+      name, in: 'path', type: 'string', required: true,
+      description: `路径参数 ${name}`, example: '',
+    })
+    changed = true
+  }
+  if (changed) parameterItems.value = current
 }
 
 async function save() {
@@ -263,34 +297,48 @@ onMounted(async () => {
     <div v-if="projectId && !templates.length" class="empty-state">还没有 API 模板。创建模板后可统一维护基础地址、请求头和超时等配置。</div>
   </el-card>
 
-  <el-dialog v-model="dialog" :title="editingId ? '编辑 API' : '登记 API'" width="760px">
-    <el-form label-position="top">
-      <div class="two-col">
-        <el-form-item label="名称"><el-input v-model="form.name" /></el-form-item>
+  <el-dialog v-model="dialog" :title="editingId ? '编辑 API' : '登记 API'" width="1080px" top="3vh" class="api-editor-dialog">
+    <div class="api-editor-intro">
+      <p>{{ editingId ? '维护请求契约、示例和验证规则。' : '先定义请求地址，再补充参数文档和调用案例。' }}</p>
+      <div class="editor-progress"><span class="is-current">1 请求配置</span><span>2 参数说明</span><span>3 参考案例</span><span>4 响应验证</span></div>
+    </div>
+    <el-form label-position="top" class="api-editor-form">
+      <div class="api-basic-grid">
+        <el-form-item label="API 名称" required><el-input v-model="form.name" placeholder="例如：查询用户订单" /></el-form-item>
         <el-form-item label="协议"><el-radio-group :model-value="form.protocol" @update:model-value="switchProtocol"><el-radio-button value="http">HTTP</el-radio-button><el-radio-button value="ws">WebSocket</el-radio-button></el-radio-group></el-form-item>
+        <el-form-item label="API 模板">
+          <el-select v-model="form.template_id" clearable placeholder="不使用模板" style="width: 100%" @change="selectTemplate">
+            <el-option v-for="item in availableTemplates" :key="item.id" :label="item.name" :value="item.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="默认断言集合">
+          <el-select v-model="form.assertion_profile_id" clearable placeholder="自动使用协议默认集合" style="width: 100%">
+            <el-option v-for="item in availableProfiles" :key="item.id" :label="`${item.name}${item.is_default ? '（默认）' : ''}`" :value="item.id" />
+          </el-select>
+        </el-form-item>
       </div>
-      <el-form-item label="API 模板">
-        <el-select v-model="form.template_id" clearable placeholder="不使用模板" style="width: 100%" @change="selectTemplate">
-          <el-option v-for="item in availableTemplates" :key="item.id" :label="item.name" :value="item.id" />
-        </el-select>
-        <div class="muted">模板配置会作为基础值，当前 API 的请求配置只需填写差异。</div>
-      </el-form-item>
-      <el-form-item label="默认断言集合">
-        <el-select v-model="form.assertion_profile_id" clearable placeholder="自动使用当前协议的默认集合" style="width: 100%">
-          <el-option v-for="item in availableProfiles" :key="item.id" :label="`${item.name}${item.is_default ? '（默认）' : ''}`" :value="item.id" />
-        </el-select>
-        <div class="muted">新建 API 不选择时自动绑定默认集合；绑定后，集合内容的修改会实时生效。</div>
-      </el-form-item>
-      <el-alert v-if="findTemplate(form.template_id)" type="success" :closable="false" show-icon>
-        <template #title>继承自 {{ findTemplate(form.template_id)?.name }}</template>
-        <pre class="template-preview">{{ pretty(findTemplate(form.template_id)?.request) }}</pre>
-      </el-alert>
-      <el-form-item label="功能说明"><el-input v-model="form.description" type="textarea" :rows="2" /></el-form-item>
-      <el-tabs>
-        <el-tab-pane label="API 请求覆盖"><el-input v-model="form.request" class="json-input" type="textarea" :rows="12" /><p class="muted">合并优先级：模板配置 &lt; API 覆盖。使用模板的 API 推荐通过 <code>path</code> 声明路径。</p></el-tab-pane>
-        <el-tab-pane label="参数说明"><el-input v-model="form.parameters" class="json-input" type="textarea" :rows="12" /><p class="muted">示例：[{ "name": "symbol", "in": "query", "required": true, "description": "交易对" }]</p></el-tab-pane>
-        <el-tab-pane label="参考案例"><el-input v-model="form.examples" class="json-input" type="textarea" :rows="12" /></el-tab-pane>
-        <el-tab-pane label="响应分支"><el-input v-model="form.response_variants" class="json-input" type="textarea" :rows="12" /><p class="muted">每个分支可配置 <code>name</code>、<code>match</code>、<code>schema</code>、<code>assertion_profile_ids</code> 和局部 <code>assertions</code>。</p></el-tab-pane>
+      <el-form-item label="功能说明"><el-input v-model="form.description" type="textarea" :rows="2" placeholder="简要说明这个 API 做什么、适用于什么场景" /></el-form-item>
+      <div v-if="findTemplate(form.template_id)" class="inheritance-notice">
+        <div><strong>已继承 {{ findTemplate(form.template_id)?.name }}</strong><span>基础地址、公共请求头和超时会自动合并，当前 API 只需填写差异。</span></div>
+        <code>{{ findTemplate(form.template_id)?.request.base_url || findTemplate(form.template_id)?.request.url }}</code>
+      </div>
+      <el-tabs class="api-editor-tabs" stretch>
+        <el-tab-pane name="request">
+          <template #label><span class="editor-tab-label"><strong>请求配置</strong><small>地址与发送内容</small></span></template>
+          <ApiRequestEditor v-model="form.request" :protocol="form.protocol" :inherited-request="findTemplate(form.template_id)?.request" @path-params="syncPathParameters" />
+        </el-tab-pane>
+        <el-tab-pane name="parameters">
+          <template #label><span class="editor-tab-label"><strong>参数说明</strong><small>{{ parameterItems.length }} 个参数</small></span></template>
+          <ApiParametersEditor v-model="parameterItems" :path-params="pathParameterNames" />
+        </el-tab-pane>
+        <el-tab-pane name="examples">
+          <template #label><span class="editor-tab-label"><strong>参考案例</strong><small>{{ exampleItems.length }} 个案例</small></span></template>
+          <ApiExamplesEditor v-model="exampleItems" />
+        </el-tab-pane>
+        <el-tab-pane name="validation">
+          <template #label><span class="editor-tab-label"><strong>响应验证</strong><small>分支与断言</small></span></template>
+          <div class="validation-editor"><div><strong>响应分支</strong><p class="muted">为成功、业务失败或预期 4xx 分别配置匹配条件和断言集合。</p></div><el-input v-model="form.response_variants" class="json-input" type="textarea" :rows="15" /><p class="muted">支持 <code>name</code>、<code>match</code>、<code>schema</code>、<code>assertion_profile_ids</code> 和局部 <code>assertions</code>。</p></div>
+        </el-tab-pane>
       </el-tabs>
     </el-form>
     <template #footer><el-button @click="dialog = false">取消</el-button><el-button type="primary" :disabled="!form.name" @click="save">保存</el-button></template>
