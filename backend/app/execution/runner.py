@@ -5,7 +5,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.execution.assertions import AssertionFailure, extract_values
-from app.execution.context import deep_merge, render
+from app.execution.context import deep_merge, render, render_path_parameters
 from app.execution.events import run_events
 from app.execution.protocols import ExecutionResult, execute_http, execute_ws
 from app.execution.validation import validate_api_response
@@ -20,7 +20,16 @@ def build_request_config(
 ) -> dict[str, Any]:
     config = deep_merge(template.request if template else {}, api.request)
     config = deep_merge(config, request_override or {})
-    return render(config, context)
+    rendered = render(config, context)
+    path_params = rendered.get("path_params", {})
+    if not isinstance(path_params, dict):
+        raise ValueError("request.path_params must be an object")
+    for field in ("url", "path"):
+        if field in rendered:
+            rendered[field] = render_path_parameters(
+                str(rendered[field]), context, path_params
+            )
+    return rendered
 
 
 async def execute_api_once(

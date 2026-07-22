@@ -1,7 +1,7 @@
 import pytest
 
 from app.execution.assertions import AssertionFailure, evaluate_assertions, extract_values
-from app.execution.context import deep_merge, render
+from app.execution.context import deep_merge, render, render_path_parameters
 from app.execution.protocols import _resolve_url
 
 
@@ -18,6 +18,19 @@ def test_deep_merge_keeps_nested_defaults() -> None:
         {"headers": {"Accept": "json", "X-App": "qa"}},
         {"headers": {"X-App": "test"}},
     ) == {"headers": {"Accept": "json", "X-App": "test"}}
+
+
+def test_render_path_parameters_uses_context_or_explicit_values() -> None:
+    assert render_path_parameters(
+        "/users/{user_id}/orders/:order_id",
+        {"user_id": "alice@example.com", "order_id": 42},
+    ) == "/users/alice%40example.com/orders/42"
+    assert render_path_parameters(
+        "/users/{user_id}", {"user_id": "context"}, {"user_id": "override"}
+    ) == "/users/override"
+
+    with pytest.raises(ValueError, match="Missing path parameter: user_id"):
+        render_path_parameters("/users/{user_id}", {})
 
 
 def test_resolve_url_supports_template_base_url_and_api_path() -> None:

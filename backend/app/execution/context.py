@@ -1,8 +1,11 @@
 import re
 from copy import deepcopy
 from typing import Any
+from urllib.parse import quote
 
 TEMPLATE_PATTERN = re.compile(r"{{\s*([\w.-]+)\s*}}")
+PATH_PARAMETER_PATTERN = re.compile(r"(?<!{)\{([A-Za-z_][A-Za-z0-9_]*)}(?!})")
+COLON_PATH_PARAMETER_PATTERN = re.compile(r"(?<=/):([A-Za-z_][A-Za-z0-9_]*)")
 
 
 def get_path(value: Any, path: str) -> Any:
@@ -32,6 +35,26 @@ def render(value: Any, context: dict[str, Any]) -> Any:
         return deepcopy(get_path(context, full_match.group(1)))
 
     return TEMPLATE_PATTERN.sub(lambda match: str(get_path(context, match.group(1))), value)
+
+
+def render_path_parameters(
+    value: str,
+    context: dict[str, Any],
+    explicit: dict[str, Any] | None = None,
+) -> str:
+    """Render REST-style ``{id}`` or ``:id`` segments with URL-safe values."""
+    values = explicit or {}
+
+    def replace(match: re.Match[str]) -> str:
+        name = match.group(1)
+        try:
+            raw = values[name] if name in values else get_path(context, name)
+        except KeyError:
+            raise ValueError(f"Missing path parameter: {name}") from None
+        return quote(str(raw), safe="")
+
+    rendered = PATH_PARAMETER_PATTERN.sub(replace, value)
+    return COLON_PATH_PARAMETER_PATTERN.sub(replace, rendered)
 
 
 def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
