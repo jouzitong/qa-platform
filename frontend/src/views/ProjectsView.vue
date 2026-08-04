@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { Delete, Edit } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { onMounted, reactive, ref } from 'vue'
 
@@ -62,7 +63,7 @@ onMounted(load)
       <el-table-column prop="name" label="名称" min-width="180" />
       <el-table-column prop="description" label="说明" min-width="260" show-overflow-tooltip />
       <el-table-column label="变量" min-width="260"><template #default="scope"><el-tag v-for="(_, key) in scope.row.variables" :key="key" size="small" effect="plain" style="margin-right: 6px">{{ key }}</el-tag></template></el-table-column>
-      <el-table-column label="操作" width="150" align="right"><template #default="scope"><el-button link type="primary" @click="openEdit(scope.row)">编辑</el-button><el-button link type="danger" @click="remove(scope.row)">删除</el-button></template></el-table-column>
+      <el-table-column label="操作" width="150" align="right"><template #default="scope"><el-button class="icon-action-button" link type="primary" :icon="Edit" aria-label="编辑" @click="openEdit(scope.row)"><span class="icon-action-label">编辑</span></el-button><el-button class="icon-action-button" link type="danger" :icon="Delete" aria-label="删除" @click="remove(scope.row)"><span class="icon-action-label">删除</span></el-button></template></el-table-column>
     </el-table>
     <div v-if="!loading && !projects.length" class="empty-state">创建第一个项目，开始沉淀测试资产。</div>
   </el-card>

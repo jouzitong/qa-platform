@@ -6,7 +6,7 @@ from jsonschema.exceptions import SchemaError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.common import get_or_404
+from app.api.common import commit_or_conflict, get_or_404
 from app.database import get_session
 from app.execution.context import deep_merge
 from app.execution.expression import ExpressionError, parse_expression
@@ -14,6 +14,7 @@ from app.execution.runner import execute_api_once
 from app.execution.validation import validate_api_response
 from app.models import ApiDefinition, ApiTemplate, AssertionProfile, Project, TestFlow
 from app.schemas import ApiCreate, ApiRead, ApiUpdate, ExecuteRequest
+from app.success_contract import default_success_contract
 
 router = APIRouter(prefix="/apis", tags=["apis"])
 
@@ -74,6 +75,28 @@ def _validate_variants(
             _validate_profile(session, project_id, protocol, str(profile_id))
 
 
+def _validate_success_contract(protocol: str, contract: dict[str, Any]) -> None:
+    if not isinstance(contract, dict):
+        raise HTTPException(status_code=422, detail="Success contract must be an object")
+    if protocol == "http":
+        status_codes = contract.get("status_codes", {})
+        if not isinstance(status_codes, dict):
+            raise HTTPException(status_code=422, detail="status_codes must be an object")
+        try:
+            minimum = int(status_codes.get("min", 200))
+            maximum = int(status_codes.get("max", 299))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="status_codes min/max must be integers")
+        if not 100 <= minimum <= maximum <= 599:
+            raise HTTPException(status_code=422, detail="status_codes must be within 100..599")
+    schema = contract.get("body_schema")
+    if schema is not None:
+        try:
+            Draft202012Validator.check_schema(schema)
+        except SchemaError as exc:
+            raise HTTPException(status_code=422, detail=f"Success response schema: {exc}") from None
+
+
 def _default_profile(session: Session, project_id: str, protocol: str) -> AssertionProfile | None:
     return session.scalar(
         select(AssertionProfile).where(
@@ -106,12 +129,18 @@ def create_api(payload: ApiCreate, session: Session = Depends(get_session)) -> A
     _validate_variants(
         session, payload.project_id, payload.protocol, payload.response_variants
     )
+    success_contract = payload.success_contract
+    if payload.protocol == "ws" and "messages" not in success_contract:
+        success_contract = default_success_contract("ws")
+    _validate_success_contract(payload.protocol, success_contract)
+    values = payload.model_dump(exclude={"assertion_profile_id"})
+    values["success_contract"] = success_contract
     definition = ApiDefinition(
-        **payload.model_dump(exclude={"assertion_profile_id"}),
+        **values,
         assertion_profile_id=profile_id,
     )
     session.add(definition)
-    session.commit()
+    commit_or_conflict(session, "API key already exists in this project")
     session.refresh(definition)
     return definition
 
@@ -142,9 +171,22 @@ def update_api(
         target_protocol,
         values.get("response_variants", definition.response_variants),
     )
+    success_contract = values.get(
+        "success_contract", definition.success_contract or default_success_contract(target_protocol)
+    )
+    if not isinstance(success_contract, dict):
+        success_contract = default_success_contract(target_protocol)
+        values["success_contract"] = success_contract
+    elif target_protocol == "ws" and "messages" not in success_contract:
+        success_contract = default_success_contract("ws")
+        values["success_contract"] = success_contract
+    elif target_protocol == "http" and "status_codes" not in success_contract:
+        success_contract = default_success_contract("http")
+        values["success_contract"] = success_contract
+    _validate_success_contract(target_protocol, success_contract)
     for field, value in values.items():
         setattr(definition, field, value)
-    session.commit()
+    commit_or_conflict(session, "API key already exists in this project")
     session.refresh(definition)
     return definition
 
@@ -185,6 +227,5 @@ async def execute_api(
         request=request_config,
         response=result.response,
         context=context,
-        allow_error_status=bool(request_config.get("allow_error_status", False)),
     )
     return {"request": result.request, "response": result.response, "validation": validation}

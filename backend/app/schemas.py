@@ -3,6 +3,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.success_contract import default_success_contract
+
 
 class ORMModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -28,6 +30,7 @@ class ProjectRead(ProjectCreate, ORMModel):
 
 class ApiCreate(BaseModel):
     project_id: str
+    key: str = Field(min_length=1, max_length=120)
     template_id: str | None = None
     assertion_profile_id: str | None = None
     name: str = Field(min_length=1, max_length=120)
@@ -36,10 +39,12 @@ class ApiCreate(BaseModel):
     request: dict[str, Any] = Field(default_factory=dict)
     parameters: list[dict[str, Any]] = Field(default_factory=list)
     examples: list[dict[str, Any]] = Field(default_factory=list)
+    success_contract: dict[str, Any] = Field(default_factory=default_success_contract)
     response_variants: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ApiUpdate(BaseModel):
+    key: str | None = Field(default=None, min_length=1, max_length=120)
     template_id: str | None = None
     assertion_profile_id: str | None = None
     name: str | None = Field(default=None, min_length=1, max_length=120)
@@ -48,6 +53,7 @@ class ApiUpdate(BaseModel):
     request: dict[str, Any] | None = None
     parameters: list[dict[str, Any]] | None = None
     examples: list[dict[str, Any]] | None = None
+    success_contract: dict[str, Any] | None = None
     response_variants: list[dict[str, Any]] | None = None
 
 
@@ -85,22 +91,24 @@ class ApiTemplateRead(ApiTemplateCreate, ORMModel):
 
 class AssertionDefinitionCreate(BaseModel):
     project_id: str
+    key: str = Field(min_length=1, max_length=120)
     name: str = Field(min_length=1, max_length=120)
     engine: Literal["path", "json_schema", "expression"] = "path"
     description: str = ""
     config: dict[str, Any] = Field(default_factory=dict)
     default_params: dict[str, Any] = Field(default_factory=dict)
-    severity: Literal["error", "warning"] = "error"
+    severity: Literal["success", "error", "warning"] = "success"
     message: str = ""
 
 
 class AssertionDefinitionUpdate(BaseModel):
+    key: str | None = Field(default=None, min_length=1, max_length=120)
     name: str | None = Field(default=None, min_length=1, max_length=120)
     engine: Literal["path", "json_schema", "expression"] | None = None
     description: str | None = None
     config: dict[str, Any] | None = None
     default_params: dict[str, Any] | None = None
-    severity: Literal["error", "warning"] | None = None
+    severity: Literal["success", "error", "warning"] | None = None
     message: str | None = None
 
 
@@ -154,6 +162,7 @@ class FlowStep(BaseModel):
 
 class FlowCreate(BaseModel):
     project_id: str
+    key: str = Field(min_length=1, max_length=120)
     name: str = Field(min_length=1, max_length=120)
     description: str = ""
     variables: dict[str, Any] = Field(default_factory=dict)
@@ -161,6 +170,7 @@ class FlowCreate(BaseModel):
 
 
 class FlowUpdate(BaseModel):
+    key: str | None = Field(default=None, min_length=1, max_length=120)
     name: str | None = Field(default=None, min_length=1, max_length=120)
     description: str | None = None
     variables: dict[str, Any] | None = None
@@ -171,6 +181,51 @@ class FlowRead(FlowCreate, ORMModel):
     id: str
     created_at: datetime
     updated_at: datetime
+
+
+class TestPlanItem(BaseModel):
+    id: str = Field(min_length=1, max_length=80)
+    type: Literal["api", "flow"]
+    target_id: str
+    enabled: bool = True
+
+
+class TestPlanCreate(BaseModel):
+    project_id: str
+    key: str = Field(min_length=1, max_length=120)
+    version: str = Field(min_length=1, max_length=60)
+    name: str = Field(min_length=1, max_length=120)
+    description: str = ""
+    items: list[TestPlanItem] = Field(default_factory=list)
+
+
+class TestPlanUpdate(BaseModel):
+    key: str | None = Field(default=None, min_length=1, max_length=120)
+    version: str | None = Field(default=None, min_length=1, max_length=60)
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = None
+    items: list[TestPlanItem] | None = None
+
+
+class TestPlanRead(TestPlanCreate, ORMModel):
+    id: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class TestPlanRunRead(ORMModel):
+    id: str
+    plan_id: str
+    status: str
+    inputs: dict[str, Any]
+    results: list[dict[str, Any]]
+    total_count: int
+    passed_count: int
+    failed_count: int
+    error: str | None
+    started_at: datetime | None
+    finished_at: datetime | None
+    created_at: datetime
 
 
 class ExecuteRequest(BaseModel):

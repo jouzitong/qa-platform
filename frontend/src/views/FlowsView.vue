@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { Delete, Edit } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { onMounted, reactive, ref, watch } from 'vue'
 
@@ -26,7 +27,7 @@ const flows = ref<TestFlow[]>([])
 const projectId = ref('')
 const dialog = ref(false)
 const editingId = ref('')
-const form = reactive({ name: '', description: '', variables: '{}', steps: [] as EditableStep[] })
+const form = reactive({ key: '', name: '', description: '', variables: '{}', steps: [] as EditableStep[] })
 
 async function load() {
   if (!projectId.value) { definitions.value = []; flows.value = []; return }
@@ -40,7 +41,7 @@ async function load() {
 function newStep(): EditableStep {
   return {
     id: `step-${crypto.randomUUID().slice(0, 8)}`, name: '', api_id: '', enabled: true,
-    request: '{}', assertions: '[\n  { "source": "status_code", "operator": "equals", "expected": 200 }\n]',
+    request: '{}', assertions: '[]',
     disabled_assertion_ids: '[]', extractors: '[]', max_attempts: 1,
     interval_ms: 0, backoff_multiplier: 1,
   }
@@ -48,12 +49,13 @@ function newStep(): EditableStep {
 
 function openCreate() {
   editingId.value = ''
-  Object.assign(form, { name: '', description: '', variables: '{}', steps: [] })
+  Object.assign(form, { key: '', name: '', description: '', variables: '{}', steps: [] })
   dialog.value = true
 }
 
 function openEdit(row: TestFlow) {
   editingId.value = row.id
+  form.key = row.key
   form.name = row.name
   form.description = row.description
   form.variables = pretty(row.variables)
@@ -79,7 +81,7 @@ function serializeStep(step: EditableStep): FlowStep {
   return {
     id: step.id, name: step.name, api_id: step.api_id, enabled: step.enabled,
     request: parseJson<Record<string, unknown>>(step.request, `${step.name} 请求覆盖`),
-    assertions: parseJson<Record<string, unknown>[]>(step.assertions, `${step.name} 断言`),
+    assertions: parseJson<Record<string, unknown>[]>(step.assertions, `${step.name} 成功条件`),
     disabled_assertion_ids: parseJson<string[]>(
       step.disabled_assertion_ids, `${step.name} 禁用断言`,
     ),
@@ -92,7 +94,7 @@ async function save() {
   try {
     if (form.steps.some((step) => !step.name || !step.api_id)) throw new Error('每个步骤都需要名称和 API')
     const payload = {
-      project_id: projectId.value, name: form.name, description: form.description,
+      project_id: projectId.value, key: form.key, name: form.name, description: form.description,
       variables: parseJson<Record<string, unknown>>(form.variables, '流程变量'), steps: form.steps.map(serializeStep),
     }
     if (editingId.value) await api.flows.update(editingId.value, payload)
@@ -119,7 +121,7 @@ onMounted(async () => {
 
 <template>
   <div class="page-head">
-    <div><h2>测试流程</h2><p>按顺序组合 API，管理上下文、断言、结果提取与失败重试。</p></div>
+    <div><h2>测试流程</h2><p>按顺序组合 API，管理上下文、成功条件、结果提取与失败重试。</p></div>
     <el-button type="primary" :disabled="!projectId || !definitions.length" @click="openCreate">新建流程</el-button>
   </div>
   <div class="toolbar">
@@ -128,11 +130,12 @@ onMounted(async () => {
   </div>
   <el-card class="panel" shadow="never">
     <el-table :data="flows">
+      <el-table-column prop="key" label="Key" min-width="180" show-overflow-tooltip />
       <el-table-column prop="name" label="流程" min-width="190" />
       <el-table-column prop="description" label="说明" min-width="250" show-overflow-tooltip />
       <el-table-column label="步骤" width="100"><template #default="scope"><el-tag effect="plain">{{ scope.row.steps.length }} steps</el-tag></template></el-table-column>
       <el-table-column label="变量" width="100"><template #default="scope">{{ Object.keys(scope.row.variables).length }}</template></el-table-column>
-      <el-table-column label="操作" width="140" align="right"><template #default="scope"><el-button link type="primary" @click="openEdit(scope.row)">编辑</el-button><el-button link type="danger" @click="remove(scope.row)">删除</el-button></template></el-table-column>
+      <el-table-column label="操作" width="140" align="right"><template #default="scope"><el-button class="icon-action-button" link type="primary" :icon="Edit" aria-label="编辑" @click="openEdit(scope.row)"><span class="icon-action-label">编辑</span></el-button><el-button class="icon-action-button" link type="danger" :icon="Delete" aria-label="删除" @click="remove(scope.row)"><span class="icon-action-label">删除</span></el-button></template></el-table-column>
     </el-table>
     <div v-if="projectId && !flows.length" class="empty-state">还没有测试流程。</div>
   </el-card>
@@ -140,9 +143,10 @@ onMounted(async () => {
   <el-dialog v-model="dialog" :title="editingId ? '编辑测试流程' : '新建测试流程'" width="940px" top="4vh">
     <el-form label-position="top">
       <div class="two-col">
-        <el-form-item label="流程名称"><el-input v-model="form.name" /></el-form-item>
-        <el-form-item label="说明"><el-input v-model="form.description" /></el-form-item>
+        <el-form-item label="流程 Key" required><el-input v-model="form.key" placeholder="例如：user.login.smoke" /></el-form-item>
+        <el-form-item label="流程名称" required><el-input v-model="form.name" /></el-form-item>
       </div>
+      <el-form-item label="说明"><el-input v-model="form.description" /></el-form-item>
       <el-form-item label="流程变量（JSON）"><el-input v-model="form.variables" class="json-input" type="textarea" :rows="4" /></el-form-item>
       <div class="page-head" style="margin: 16px 0 10px"><div><strong>流程步骤</strong><p>提取值将写入上下文，供后续步骤通过模板引用。</p></div><el-button @click="form.steps.push(newStep())">添加步骤</el-button></div>
       <div v-for="(step, index) in form.steps" :key="step.id" class="step-card">
@@ -157,13 +161,13 @@ onMounted(async () => {
         </div>
         <el-tabs type="border-card">
           <el-tab-pane label="请求覆盖"><el-input v-model="step.request" class="json-input" type="textarea" :rows="6" /></el-tab-pane>
-          <el-tab-pane label="断言"><el-input v-model="step.assertions" class="json-input" type="textarea" :rows="5" /><p class="muted" style="margin: 8px 0">禁用继承断言 ID：</p><el-input v-model="step.disabled_assertion_ids" class="json-input" type="textarea" :rows="2" /></el-tab-pane>
+          <el-tab-pane label="成功条件"><el-input v-model="step.assertions" class="json-input" type="textarea" :rows="5" /><p class="muted" style="margin: 8px 0">这里只补充 API 成功契约之外的流程级成功条件；API 的状态码和响应体契约始终生效。</p></el-tab-pane>
           <el-tab-pane label="提取器"><el-input v-model="step.extractors" class="json-input" type="textarea" :rows="6" /><p class="muted">示例：[{ "name": "token", "source": "body.data.token" }]</p></el-tab-pane>
           <el-tab-pane label="失败重试"><div class="retry-fields"><el-form-item label="最多尝试"><el-input-number v-model="step.max_attempts" :min="1" :max="10" /></el-form-item><el-form-item label="间隔（ms）"><el-input-number v-model="step.interval_ms" :min="0" /></el-form-item><el-form-item label="退避倍数"><el-input-number v-model="step.backoff_multiplier" :min="1" :step="0.5" /></el-form-item></div></el-tab-pane>
         </el-tabs>
       </div>
       <div v-if="!form.steps.length" class="empty-state">点击“添加步骤”开始编排。</div>
     </el-form>
-    <template #footer><el-button @click="dialog = false">取消</el-button><el-button type="primary" :disabled="!form.name" @click="save">保存流程</el-button></template>
+    <template #footer><el-button @click="dialog = false">取消</el-button><el-button type="primary" :disabled="!form.key || !form.name" @click="save">保存流程</el-button></template>
   </el-dialog>
 </template>

@@ -4,10 +4,50 @@ from sqlalchemy.orm import Session
 
 from app.database import Base
 from app.execution.protocols import ExecutionResult
-from app.execution.runner import execute_flow
+from app.execution.plans import execute_plan
+from app.execution.runner import build_request_config, execute_flow
 from app.models import ApiDefinition, ApiTemplate, Project
 from app.models import TestFlow as FlowModel
+from app.models import TestPlan as PlanModel
+from app.models import TestPlanRun as PlanRunModel
 from app.models import TestRun as RunModel
+
+
+def test_parameter_defaults_build_request_values_and_inputs_override() -> None:
+    api = ApiDefinition(
+        project_id="project",
+        key="search",
+        name="search",
+        protocol="http",
+        request={
+            "method": "GET",
+            "base_url": "https://example.test",
+            "path": "/users/{user_id}",
+            "body": {"user_id": "legacy"},
+        },
+        parameters=[
+            {"name": "user_id", "in": "path", "type": "integer", "default": "42"},
+            {"name": "page", "in": "query", "type": "integer", "default": "1"},
+            {"name": "X-Client", "in": "header", "type": "string", "default": "qa"},
+            {"name": "enabled", "in": "body", "type": "boolean", "default": "true"},
+        ],
+    )
+
+    defaults = build_request_config(api, {})
+    assert defaults["path_params"] == {"user_id": 42}
+    assert defaults["query"] == {"page": 1}
+    assert defaults["headers"] == {"X-Client": "qa"}
+    assert defaults["body"] == {"user_id": "legacy", "enabled": True}
+    assert defaults["path"] == "/users/42"
+
+    overridden = build_request_config(
+        api,
+        {"user_id": 7},
+        request_override={"query": {"page": 3}},
+    )
+    assert overridden["path_params"] == {"user_id": 7}
+    assert overridden["query"] == {"page": 3}
+    assert overridden["path"] == "/users/7"
 
 
 @pytest.mark.asyncio
@@ -48,6 +88,7 @@ async def test_flow_retries_and_updates_context(monkeypatch) -> None:
         api = ApiDefinition(
             project_id=project.id,
             template_id=template.id,
+            key="login",
             name="login",
             protocol="http",
             request={
@@ -60,6 +101,7 @@ async def test_flow_retries_and_updates_context(monkeypatch) -> None:
         session.flush()
         flow = FlowModel(
             project_id=project.id,
+            key="smoke",
             name="smoke",
             steps=[
                 {
@@ -86,3 +128,70 @@ async def test_flow_retries_and_updates_context(monkeypatch) -> None:
         assert run.status == "passed"
         assert run.context["token"] == "done"
         assert [item.status for item in run.step_runs] == ["failed", "passed"]
+
+
+@pytest.mark.asyncio
+async def test_test_plan_executes_flow_and_records_details(monkeypatch) -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+
+    async def fake_http(config):
+        return ExecutionResult(
+            request={"base_url": config["base_url"], "path": config["path"]},
+            response={"status_code": 200, "body": {"ok": True}},
+        )
+
+    monkeypatch.setattr("app.execution.runner.execute_http", fake_http)
+
+    with Session(engine, expire_on_commit=False) as session:
+        project = Project(name="plan-project", variables={"base_url": "https://example.test"})
+        session.add(project)
+        session.flush()
+        api = ApiDefinition(
+            project_id=project.id,
+            key="health",
+            name="health",
+            protocol="http",
+            request={"method": "GET", "base_url": "https://example.test", "path": "/health"},
+        )
+        session.add(api)
+        session.flush()
+        flow = FlowModel(
+            project_id=project.id,
+            key="smoke",
+            name="smoke",
+            steps=[
+                {
+                    "id": "health",
+                    "name": "Health",
+                    "api_id": api.id,
+                    "assertions": [
+                        {"source": "status_code", "operator": "equals", "expected": 200}
+                    ],
+                }
+            ],
+        )
+        session.add(flow)
+        session.flush()
+        plan = PlanModel(
+            project_id=project.id,
+            key="release.smoke",
+            version="v1.0.0",
+            name="Release smoke",
+            items=[{"id": "flow-item", "type": "flow", "target_id": flow.id}],
+        )
+        session.add(plan)
+        session.flush()
+        plan_run = PlanRunModel(plan_id=plan.id, inputs={})
+        session.add(plan_run)
+        session.commit()
+
+        await execute_plan(session, plan_run.id)
+        session.refresh(plan_run)
+
+        assert plan_run.status == "passed"
+        assert plan_run.total_count == 1
+        assert plan_run.passed_count == 1
+        assert plan_run.failed_count == 0
+        assert plan_run.results[0]["target_key"] == "smoke"
+        assert plan_run.results[0]["details"]["step_runs"][0]["status"] == "passed"

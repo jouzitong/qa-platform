@@ -10,6 +10,7 @@ export interface Project {
 export interface ApiDefinition {
   id: string
   project_id: string
+  key: string
   template_id: string | null
   assertion_profile_id: string | null
   name: string
@@ -18,6 +19,7 @@ export interface ApiDefinition {
   request: Record<string, unknown>
   parameters: Record<string, unknown>[]
   examples: Record<string, unknown>[]
+  success_contract: Record<string, unknown>
   response_variants: Record<string, unknown>[]
   created_at: string
   updated_at: string
@@ -26,12 +28,13 @@ export interface ApiDefinition {
 export interface AssertionDefinition {
   id: string
   project_id: string
+  key: string
   name: string
   engine: 'path' | 'json_schema' | 'expression'
   description: string
   config: Record<string, unknown>
   default_params: Record<string, unknown>
-  severity: 'error' | 'warning'
+  severity: 'success' | 'error' | 'warning'
   message: string
   created_at: string
   updated_at: string
@@ -55,7 +58,7 @@ export interface AssertionResult {
   name: string
   engine: string
   passed: boolean
-  severity: 'error' | 'warning'
+  severity: 'success' | 'error' | 'warning'
   message: string
   actual: unknown
 }
@@ -95,12 +98,49 @@ export interface FlowStep {
 export interface TestFlow {
   id: string
   project_id: string
+  key: string
   name: string
   description: string
   variables: Record<string, unknown>
   steps: FlowStep[]
   created_at: string
   updated_at: string
+}
+
+export type TestPlanItemType = 'api' | 'flow'
+
+export interface TestPlanItem {
+  id: string
+  type: TestPlanItemType
+  target_id: string
+  enabled: boolean
+}
+
+export interface TestPlan {
+  id: string
+  project_id: string
+  key: string
+  version: string
+  name: string
+  description: string
+  items: TestPlanItem[]
+  created_at: string
+  updated_at: string
+}
+
+export interface TestPlanRun {
+  id: string
+  plan_id: string
+  status: string
+  inputs: Record<string, unknown>
+  results: Record<string, unknown>[]
+  total_count: number
+  passed_count: number
+  failed_count: number
+  error: string | null
+  started_at: string | null
+  finished_at: string | null
+  created_at: string
 }
 
 export interface StepRun {

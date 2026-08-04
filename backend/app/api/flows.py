@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.common import get_or_404
+from app.api.common import commit_or_conflict, get_or_404
 from app.database import get_session
 from app.models import ApiDefinition, Project, TestFlow
 from app.schemas import FlowCreate, FlowRead, FlowUpdate
@@ -41,7 +41,7 @@ def create_flow(payload: FlowCreate, session: Session = Depends(get_session)) ->
     _validate_steps(session, payload.project_id, values["steps"])
     flow = TestFlow(**values)
     session.add(flow)
-    session.commit()
+    commit_or_conflict(session, "Test flow key already exists in this project")
     session.refresh(flow)
     return flow
 
@@ -61,7 +61,7 @@ def update_flow(
         _validate_steps(session, flow.project_id, values["steps"])
     for field, value in values.items():
         setattr(flow, field, value)
-    session.commit()
+    commit_or_conflict(session, "Test flow key already exists in this project")
     session.refresh(flow)
     return flow
 

@@ -1,4 +1,5 @@
 import asyncio
+import json
 from time import perf_counter
 from typing import Any
 
@@ -18,9 +19,14 @@ def build_request_config(
     request_override: dict[str, Any] | None = None,
     template: ApiTemplate | None = None,
 ) -> dict[str, Any]:
+    parameters = _effective_parameters(api, template)
+    parameter_context = _context_with_parameter_defaults(parameters, context)
     config = deep_merge(template.request if template else {}, api.request)
+    config = render(config, parameter_context)
+    config = _apply_parameter_values(config, parameters, parameter_context, overwrite=True)
     config = deep_merge(config, request_override or {})
-    rendered = render(config, context)
+    rendered = render(config, parameter_context)
+    rendered = _apply_parameter_values(rendered, parameters, parameter_context, overwrite=False)
     path_params = rendered.get("path_params", {})
     if not isinstance(path_params, dict):
         raise ValueError("request.path_params must be an object")
@@ -30,6 +36,100 @@ def build_request_config(
                 str(rendered[field]), context, path_params
             )
     return rendered
+
+
+def _effective_parameters(
+    api: ApiDefinition, template: ApiTemplate | None
+) -> list[dict[str, Any]]:
+    """Combine template and API parameter definitions, with API values taking precedence."""
+    parameters: dict[tuple[str, str], dict[str, Any]] = {}
+    for item in [*(template.parameters if template else []), *api.parameters]:
+        if not isinstance(item, dict):
+            continue
+        location = str(item.get("in", "query"))
+        name = str(item.get("name", "")).strip()
+        if name:
+            parameters[(location, name)] = item
+    return list(parameters.values())
+
+
+def _context_with_parameter_defaults(
+    parameters: list[dict[str, Any]], context: dict[str, Any]
+) -> dict[str, Any]:
+    enriched = dict(context)
+    for parameter in parameters:
+        name = str(parameter.get("name", "")).strip()
+        if not name or name in enriched or "default" not in parameter:
+            continue
+        default = render(parameter["default"], enriched)
+        enriched[name] = _coerce_parameter_value(default, parameter)
+    return enriched
+
+
+def _apply_parameter_values(
+    config: dict[str, Any],
+    parameters: list[dict[str, Any]],
+    context: dict[str, Any],
+    *,
+    overwrite: bool,
+) -> dict[str, Any]:
+    result = dict(config)
+    for parameter in parameters:
+        location = str(parameter.get("in", "query"))
+        name = str(parameter.get("name", "")).strip()
+        if not name or name not in context:
+            continue
+        value = _coerce_parameter_value(context[name], parameter)
+        if location == "path":
+            path_params = result.get("path_params")
+            if not isinstance(path_params, dict):
+                path_params = {}
+            if overwrite or name not in path_params:
+                path_params[name] = value
+            result["path_params"] = path_params
+            continue
+        if location not in {"query", "header", "body"}:
+            continue
+        if location == "body":
+            values = result.get("body")
+            if not isinstance(values, dict):
+                values = {}
+            if overwrite or name not in values:
+                values[name] = value
+            result["body"] = values
+            continue
+        config_field = "headers" if location == "header" else location
+        values = result.get(config_field)
+        if not isinstance(values, dict):
+            values = {}
+        if overwrite or name not in values:
+            values[name] = value
+        result[config_field] = values
+    return result
+
+
+def _coerce_parameter_value(value: Any, parameter: dict[str, Any]) -> Any:
+    if not isinstance(value, str):
+        return value
+    parameter_type = str(parameter.get("type", "string"))
+    if parameter_type == "integer":
+        try:
+            return int(value)
+        except ValueError:
+            return value
+    if parameter_type == "number":
+        try:
+            return float(value)
+        except ValueError:
+            return value
+    if parameter_type == "boolean" and value.lower() in {"true", "false"}:
+        return value.lower() == "true"
+    if parameter_type in {"object", "array"}:
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value
+    return value
 
 
 async def execute_api_once(
@@ -128,14 +228,13 @@ async def _execute_step(
                 context=context,
                 step_assertions=step.get("assertions", []),
                 step_disabled_assertion_ids=step.get("disabled_assertion_ids", []),
-                allow_error_status=bool(request_config.get("allow_error_status", False)),
             )
             assertion_results = validation["results"]
             if not validation["passed"]:
                 failures = [
                     item["message"]
                     for item in assertion_results
-                    if not item["passed"] and item["severity"] == "error"
+                    if not item["passed"]
                 ]
                 raise AssertionFailure("; ".join(failures))
             extracted = extract_values(result.response, step.get("extractors", []))

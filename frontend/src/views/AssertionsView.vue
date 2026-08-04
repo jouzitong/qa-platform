@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { Delete, Edit } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { onMounted, reactive, ref, watch } from 'vue'
 
@@ -17,12 +18,13 @@ const editingDefinitionId = ref('')
 const editingProfileId = ref('')
 
 const definitionForm = reactive({
+  key: '',
   name: '',
   engine: 'expression' as 'path' | 'json_schema' | 'expression',
   description: '',
-  config: '{\n  "expression": "response.status_code == 200"\n}',
+  config: '{\n  "expression": "response.status_code >= 200 and response.status_code < 300"\n}',
   default_params: '{}',
-  severity: 'error' as 'error' | 'warning',
+  severity: 'success' as 'success' | 'error' | 'warning',
   message: '',
 })
 const profileForm = reactive({
@@ -48,15 +50,15 @@ function defaultConfig(engine: 'path' | 'json_schema' | 'expression') {
     return { source: 'status_code', operator: 'equals', expected: 200 }
   if (engine === 'json_schema')
     return { source: 'body', schema: { type: 'object', required: [] } }
-  return { expression: 'response.status_code == 200' }
+  return { expression: 'response.status_code >= 200 and response.status_code < 300' }
 }
 
 function openDefinitionCreate() {
   editingDefinitionId.value = ''
   Object.assign(definitionForm, {
-    name: '', engine: 'expression', description: '',
+    key: '', name: '', engine: 'expression', description: '',
     config: pretty(defaultConfig('expression')), default_params: '{}',
-    severity: 'error', message: '',
+    severity: 'success', message: '',
   })
   definitionDialog.value = true
 }
@@ -64,9 +66,9 @@ function openDefinitionCreate() {
 function openDefinitionEdit(row: AssertionDefinition) {
   editingDefinitionId.value = row.id
   Object.assign(definitionForm, {
-    name: row.name, engine: row.engine, description: row.description,
+    key: row.key, name: row.name, engine: row.engine, description: row.description,
     config: pretty(row.config), default_params: pretty(row.default_params),
-    severity: row.severity, message: row.message,
+    severity: 'success', message: row.message,
   })
   definitionDialog.value = true
 }
@@ -80,30 +82,31 @@ async function saveDefinition() {
   try {
     const payload = {
       project_id: projectId.value,
+      key: definitionForm.key,
       name: definitionForm.name,
       engine: definitionForm.engine,
       description: definitionForm.description,
-      config: parseJson<Record<string, unknown>>(definitionForm.config, '断言配置'),
+      config: parseJson<Record<string, unknown>>(definitionForm.config, '条件配置'),
       default_params: parseJson<Record<string, unknown>>(
         definitionForm.default_params, '默认参数',
       ),
-      severity: definitionForm.severity,
+      severity: 'success' as const,
       message: definitionForm.message,
     }
     if (editingDefinitionId.value)
       await api.assertionDefinitions.update(editingDefinitionId.value, payload)
     else await api.assertionDefinitions.create(payload)
     definitionDialog.value = false
-    ElMessage.success('断言定义已保存')
+    ElMessage.success('成功条件已保存')
     await load()
   } catch (error) { ElMessage.error((error as Error).message) }
 }
 
 async function removeDefinition(row: AssertionDefinition) {
-  await ElMessageBox.confirm(`删除断言“${row.name}”？被集合引用时无法删除。`, '确认删除', { type: 'warning' })
+  await ElMessageBox.confirm(`删除成功条件“${row.name}”？被集合引用时无法删除。`, '确认删除', { type: 'warning' })
   try {
     await api.assertionDefinitions.remove(row.id)
-    ElMessage.success('断言定义已删除')
+    ElMessage.success('成功条件已删除')
     await load()
   } catch (error) { ElMessage.error((error as Error).message) }
 }
@@ -153,16 +156,16 @@ async function saveProfile() {
       await api.assertionProfiles.update(editingProfileId.value, payload)
     else await api.assertionProfiles.create(payload)
     profileDialog.value = false
-    ElMessage.success('断言集合已保存')
+    ElMessage.success('成功条件集合已保存')
     await load()
   } catch (error) { ElMessage.error((error as Error).message) }
 }
 
 async function removeProfile(row: AssertionProfile) {
-  await ElMessageBox.confirm(`删除集合“${row.name}”？被 API 引用时无法删除。`, '确认删除', { type: 'warning' })
+  await ElMessageBox.confirm(`删除成功条件集合“${row.name}”？被 API 引用时无法删除。`, '确认删除', { type: 'warning' })
   try {
     await api.assertionProfiles.remove(row.id)
-    ElMessage.success('断言集合已删除')
+    ElMessage.success('成功条件集合已删除')
     await load()
   } catch (error) { ElMessage.error((error as Error).message) }
 }
@@ -178,30 +181,30 @@ onMounted(async () => {
 
 <template>
   <div class="page-head">
-    <div><h2>可复用断言</h2><p>将通用判断定义一次，再通过断言集合绑定到项目 API。</p></div>
-    <el-button v-if="activeTab === 'definitions'" type="primary" :disabled="!projectId" @click="openDefinitionCreate">新建断言</el-button>
-    <el-button v-else type="primary" :disabled="!projectId" @click="openProfileCreate">新建集合</el-button>
+    <div><h2>成功条件</h2><p>定义 API 必须满足的成功标准；任一条件不满足，执行结果就是失败。</p></div>
+    <el-button v-if="activeTab === 'definitions'" type="primary" :disabled="!projectId" @click="openDefinitionCreate">新建成功条件</el-button>
+    <el-button v-else type="primary" :disabled="!projectId" @click="openProfileCreate">新建成功集合</el-button>
   </div>
   <div class="toolbar">
     <el-select v-model="projectId" placeholder="选择项目" style="width: 260px">
       <el-option v-for="project in projects" :key="project.id" :label="project.name" :value="project.id" />
     </el-select>
     <el-radio-group v-model="activeTab">
-      <el-radio-button value="definitions">原子断言</el-radio-button>
-      <el-radio-button value="profiles">断言集合</el-radio-button>
+      <el-radio-button value="definitions">原子成功条件</el-radio-button>
+      <el-radio-button value="profiles">成功条件集合</el-radio-button>
     </el-radio-group>
   </div>
 
   <el-card v-if="activeTab === 'definitions'" class="panel" shadow="never">
     <el-table :data="definitions">
+      <el-table-column prop="key" label="Key" min-width="180" show-overflow-tooltip />
       <el-table-column prop="name" label="名称" min-width="180" />
       <el-table-column label="引擎" width="130"><template #default="scope"><el-tag effect="plain">{{ scope.row.engine }}</el-tag></template></el-table-column>
       <el-table-column prop="description" label="用途" min-width="220" show-overflow-tooltip />
-      <el-table-column label="级别" width="100"><template #default="scope"><el-tag :type="scope.row.severity === 'warning' ? 'warning' : 'danger'">{{ scope.row.severity }}</el-tag></template></el-table-column>
       <el-table-column label="配置" min-width="300" show-overflow-tooltip><template #default="scope"><code>{{ pretty(scope.row.config) }}</code></template></el-table-column>
-      <el-table-column label="操作" width="140" align="right"><template #default="scope"><el-button link type="primary" @click="openDefinitionEdit(scope.row)">编辑</el-button><el-button link type="danger" @click="removeDefinition(scope.row)">删除</el-button></template></el-table-column>
+      <el-table-column label="操作" width="140" align="right"><template #default="scope"><el-button class="icon-action-button" link type="primary" :icon="Edit" aria-label="编辑" @click="openDefinitionEdit(scope.row)"><span class="icon-action-label">编辑</span></el-button><el-button class="icon-action-button" link type="danger" :icon="Delete" aria-label="删除" @click="removeDefinition(scope.row)"><span class="icon-action-label">删除</span></el-button></template></el-table-column>
     </el-table>
-    <div v-if="projectId && !definitions.length" class="empty-state">当前项目还没有断言定义。</div>
+    <div v-if="projectId && !definitions.length" class="empty-state">当前项目还没有成功条件。</div>
   </el-card>
 
   <el-card v-else class="panel" shadow="never">
@@ -209,29 +212,29 @@ onMounted(async () => {
       <el-table-column prop="name" label="集合名称" min-width="190" />
       <el-table-column label="协议" width="100"><template #default="scope"><el-tag>{{ scope.row.protocol.toUpperCase() }}</el-tag></template></el-table-column>
       <el-table-column label="默认" width="90"><template #default="scope"><el-tag v-if="scope.row.is_default" type="success">默认</el-tag><span v-else class="muted">—</span></template></el-table-column>
-      <el-table-column label="断言" min-width="280"><template #default="scope"><el-space wrap><el-tag v-for="binding in scope.row.bindings" :key="String(binding.assertion_id)" effect="plain">{{ definitionName(binding.assertion_id) }}</el-tag><span v-if="!scope.row.bindings.length" class="muted">空集合</span></el-space></template></el-table-column>
+      <el-table-column label="成功条件" min-width="280"><template #default="scope"><el-space wrap><el-tag v-for="binding in scope.row.bindings" :key="String(binding.assertion_id)" effect="plain">{{ definitionName(binding.assertion_id) }}</el-tag><span v-if="!scope.row.bindings.length" class="muted">空集合</span></el-space></template></el-table-column>
       <el-table-column label="引用 API" width="100"><template #default="scope">{{ scope.row.usage_count }}</template></el-table-column>
-      <el-table-column label="操作" width="140" align="right"><template #default="scope"><el-button link type="primary" @click="openProfileEdit(scope.row)">编辑</el-button><el-button link type="danger" @click="removeProfile(scope.row)">删除</el-button></template></el-table-column>
+      <el-table-column label="操作" width="140" align="right"><template #default="scope"><el-button class="icon-action-button" link type="primary" :icon="Edit" aria-label="编辑" @click="openProfileEdit(scope.row)"><span class="icon-action-label">编辑</span></el-button><el-button class="icon-action-button" link type="danger" :icon="Delete" aria-label="删除" @click="removeProfile(scope.row)"><span class="icon-action-label">删除</span></el-button></template></el-table-column>
     </el-table>
-    <div v-if="projectId && !profiles.length" class="empty-state">创建一个默认集合后，新 API 会自动绑定它。</div>
+    <div v-if="projectId && !profiles.length" class="empty-state">创建一个默认成功集合后，新 API 会自动绑定它。</div>
   </el-card>
 
-  <el-dialog v-model="definitionDialog" :title="editingDefinitionId ? '编辑断言定义' : '新建断言定义'" width="720px">
+  <el-dialog v-model="definitionDialog" :title="editingDefinitionId ? '编辑成功条件' : '新建成功条件'" width="720px">
     <el-form label-position="top">
       <div class="two-col">
-        <el-form-item label="名称"><el-input v-model="definitionForm.name" placeholder="例如：业务 code 成功" /></el-form-item>
-        <el-form-item label="级别"><el-radio-group v-model="definitionForm.severity"><el-radio-button value="error">失败</el-radio-button><el-radio-button value="warning">警告</el-radio-button></el-radio-group></el-form-item>
+        <el-form-item label="Key" required><el-input v-model="definitionForm.key" placeholder="例如：response.success" /></el-form-item>
+        <el-form-item label="名称" required><el-input v-model="definitionForm.name" placeholder="例如：业务 code 成功" /></el-form-item>
       </div>
       <el-form-item label="引擎"><el-radio-group :model-value="definitionForm.engine" @update:model-value="switchEngine"><el-radio-button value="path">路径比较</el-radio-button><el-radio-button value="json_schema">JSON Schema</el-radio-button><el-radio-button value="expression">安全表达式</el-radio-button></el-radio-group></el-form-item>
       <el-form-item label="说明"><el-input v-model="definitionForm.description" /></el-form-item>
-      <el-form-item label="断言配置"><el-input v-model="definitionForm.config" class="json-input" type="textarea" :rows="10" /></el-form-item>
+      <el-form-item label="条件配置"><el-input v-model="definitionForm.config" class="json-input" type="textarea" :rows="10" /></el-form-item>
       <el-form-item label="默认参数"><el-input v-model="definitionForm.default_params" class="json-input" type="textarea" :rows="4" /><div class="muted">表达式通过 <code>params</code> 读取；集合绑定可以覆盖这些参数。</div></el-form-item>
-      <el-form-item label="失败消息"><el-input v-model="definitionForm.message" placeholder="留空时使用系统消息" /></el-form-item>
+      <el-form-item label="未满足时提示"><el-input v-model="definitionForm.message" placeholder="留空时使用系统消息" /></el-form-item>
     </el-form>
-    <template #footer><el-button @click="definitionDialog = false">取消</el-button><el-button type="primary" :disabled="!definitionForm.name" @click="saveDefinition">保存</el-button></template>
+    <template #footer><el-button @click="definitionDialog = false">取消</el-button><el-button type="primary" :disabled="!definitionForm.key || !definitionForm.name" @click="saveDefinition">保存</el-button></template>
   </el-dialog>
 
-  <el-dialog v-model="profileDialog" :title="editingProfileId ? '编辑断言集合' : '新建断言集合'" width="780px">
+  <el-dialog v-model="profileDialog" :title="editingProfileId ? '编辑成功条件集合' : '新建成功条件集合'" width="780px">
     <el-form label-position="top">
       <div class="two-col">
         <el-form-item label="集合名称"><el-input v-model="profileForm.name" /></el-form-item>
@@ -239,10 +242,10 @@ onMounted(async () => {
       </div>
       <el-form-item label="说明"><el-input v-model="profileForm.description" /></el-form-item>
       <el-form-item label="默认集合"><el-switch v-model="profileForm.is_default" active-text="新建 API 自动绑定" /></el-form-item>
-      <el-form-item label="快速添加断言">
+      <el-form-item label="快速添加成功条件">
         <el-space wrap><el-button v-for="item in definitions" :key="item.id" size="small" @click="addBinding(item)">+ {{ item.name }}</el-button></el-space>
       </el-form-item>
-      <el-form-item label="集合绑定"><el-input v-model="profileForm.bindings" class="json-input" type="textarea" :rows="11" /><div class="muted">每项包含 <code>assertion_id</code>、<code>enabled</code> 和可选的 <code>params</code>、<code>severity</code>、<code>message</code>。</div></el-form-item>
+      <el-form-item label="集合绑定"><el-input v-model="profileForm.bindings" class="json-input" type="textarea" :rows="11" /><div class="muted">每项包含 <code>assertion_id</code>、<code>enabled</code> 和可选的 <code>params</code>、<code>message</code>。</div></el-form-item>
     </el-form>
     <template #footer><el-button @click="profileDialog = false">取消</el-button><el-button type="primary" :disabled="!profileForm.name" @click="saveProfile">保存集合</el-button></template>
   </el-dialog>

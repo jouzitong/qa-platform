@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { View } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { computed, onMounted, reactive, ref } from 'vue'
 
@@ -72,7 +73,7 @@ onMounted(load)
       <el-table-column label="尝试次数" width="110"><template #default="scope">{{ scope.row.step_runs.length }}</template></el-table-column>
       <el-table-column label="开始时间" min-width="190"><template #default="scope">{{ new Date(scope.row.created_at).toLocaleString() }}</template></el-table-column>
       <el-table-column label="耗时" width="110"><template #default="scope">{{ totalDuration(scope.row) }} ms</template></el-table-column>
-      <el-table-column label="" width="90"><template #default><el-button link type="primary">详情</el-button></template></el-table-column>
+      <el-table-column label="" width="90"><template #default="scope"><el-button class="icon-action-button" link type="primary" :icon="View" aria-label="详情" @click.stop="openDetail(scope.row)"><span class="icon-action-label">详情</span></el-button></template></el-table-column>
     </el-table>
     <div v-if="!runs.length" class="empty-state">还没有执行记录。</div>
   </el-card>
@@ -98,9 +99,9 @@ onMounted(load)
           <template #title><span class="step-number" style="margin-right: 10px">{{ step.position + 1 }}</span><strong>{{ step.step_name }}</strong><el-tag :type="step.status === 'passed' ? 'success' : 'danger'" size="small" style="margin-left: 10px">attempt {{ step.attempt }} · {{ step.status }}</el-tag><span class="muted" style="margin-left: auto; margin-right: 12px">{{ step.duration_ms.toFixed(0) }} ms</span></template>
           <div class="two-col"><div><p class="muted">请求</p><pre class="code-block">{{ pretty(step.request_snapshot) }}</pre></div><div><p class="muted">响应</p><pre class="code-block">{{ pretty(step.response_snapshot || { error: step.error }) }}</pre></div></div>
           <div v-if="step.assertion_results.length" class="assertion-results">
-            <p class="muted">断言结果</p>
+            <p class="muted">成功条件结果</p>
             <div v-for="result in step.assertion_results" :key="result.assertion_id" class="assertion-result">
-              <el-tag :type="result.passed ? 'success' : result.severity === 'warning' ? 'warning' : 'danger'" size="small">{{ result.passed ? '通过' : result.severity === 'warning' ? '警告' : '失败' }}</el-tag>
+              <el-tag :type="result.passed ? 'success' : 'danger'" size="small">{{ result.passed ? '通过' : '失败' }}</el-tag>
               <strong>{{ result.name }}</strong><span class="muted">{{ result.message }}</span>
             </div>
           </div>

@@ -8,6 +8,8 @@ from app.api.assertions import profiles_router as assertion_profiles_router
 from app.api.definitions import router as definitions_router
 from app.api.flows import router as flows_router
 from app.api.projects import router as projects_router
+from app.api.plans import router as plans_router
+from app.api.plans import runs_router as plan_runs_router
 from app.api.runs import router as runs_router
 from app.api.templates import router as templates_router
 from app.config import settings
@@ -40,6 +42,8 @@ app.include_router(definitions_router, prefix="/api/v1")
 app.include_router(assertion_definitions_router, prefix="/api/v1")
 app.include_router(assertion_profiles_router, prefix="/api/v1")
 app.include_router(flows_router, prefix="/api/v1")
+app.include_router(plans_router, prefix="/api/v1")
+app.include_router(plan_runs_router, prefix="/api/v1")
 app.include_router(runs_router, prefix="/api/v1")
 
 

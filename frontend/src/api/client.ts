@@ -5,6 +5,8 @@ import type {
   AssertionProfile,
   Project,
   TestFlow,
+  TestPlan,
+  TestPlanRun,
   TestRun,
 } from '../types'
 
@@ -104,6 +106,21 @@ export const api = {
     update: (id: string, payload: Partial<TestFlow>) =>
       request<TestFlow>(`/flows/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
     remove: (id: string) => request<void>(`/flows/${id}`, { method: 'DELETE' }),
+  },
+  testPlans: {
+    list: (projectId?: string) =>
+      request<TestPlan[]>(`/test-plans${projectId ? `?project_id=${projectId}` : ''}`),
+    create: (payload: Partial<TestPlan>) =>
+      request<TestPlan>('/test-plans', { method: 'POST', body: JSON.stringify(payload) }),
+    update: (id: string, payload: Partial<TestPlan>) =>
+      request<TestPlan>(`/test-plans/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+    remove: (id: string) => request<void>(`/test-plans/${id}`, { method: 'DELETE' }),
+    runs: (id: string) => request<TestPlanRun[]>(`/test-plans/${id}/runs`),
+    run: (id: string, inputs: object = {}) =>
+      request<TestPlanRun>(`/test-plans/${id}/runs`, {
+        method: 'POST', body: JSON.stringify({ inputs }),
+      }),
+    getRun: (runId: string) => request<TestPlanRun>(`/test-plan-runs/${runId}`),
   },
   runs: {
     list: (flowId?: string) =>

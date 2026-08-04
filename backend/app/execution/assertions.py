@@ -22,7 +22,9 @@ def evaluate_assertion_rules(
         for rule in assertions
         if rule.get("enabled", True)
     ]
-    passed = all(item["passed"] or item["severity"] == "warning" for item in results)
+    # Every configured rule describes what success looks like. A failed rule is
+    # therefore a failed API result, regardless of the legacy severity value.
+    passed = all(item["passed"] for item in results)
     return {"passed": passed, "results": results}
 
 
@@ -30,11 +32,7 @@ def evaluate_assertions(response: dict[str, Any], assertions: list[dict[str, Any
     """Compatibility entry point for existing callers using inline path assertions."""
     validation = evaluate_assertion_rules(response, assertions)
     if not validation["passed"]:
-        failures = [
-            item["message"]
-            for item in validation["results"]
-            if not item["passed"] and item["severity"] == "error"
-        ]
+        failures = [item["message"] for item in validation["results"] if not item["passed"]]
         raise AssertionFailure("; ".join(failures))
 
 
@@ -48,7 +46,9 @@ def _evaluate_rule(
     config = rule.get("config") if isinstance(rule.get("config"), dict) else rule
     assertion_id = str(rule.get("assertion_id") or rule.get("id") or "inline")
     name = str(rule.get("name") or config.get("source") or engine)
-    severity = str(rule.get("severity", "error"))
+    # Severity is retained in stored payloads for compatibility, but all rules
+    # now describe positive success conditions and are blocking when unmet.
+    severity = "success"
     params = {**rule.get("default_params", {}), **rule.get("params", {})}
     actual: Any = None
     detail = ""

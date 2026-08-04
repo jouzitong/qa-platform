@@ -4,7 +4,7 @@ from jsonschema.exceptions import SchemaError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.common import get_or_404
+from app.api.common import commit_or_conflict, get_or_404
 from app.database import get_session
 from app.execution.expression import ExpressionError, parse_expression
 from app.models import ApiDefinition, AssertionDefinition, AssertionProfile, Project
@@ -86,7 +86,7 @@ def create_definition(
     _validate_definition(payload.engine, payload.config)
     definition = AssertionDefinition(**payload.model_dump())
     session.add(definition)
-    session.commit()
+    commit_or_conflict(session, "Assertion name or key already exists in this project")
     session.refresh(definition)
     return definition
 
@@ -104,7 +104,7 @@ def update_definition(
     )
     for field, value in values.items():
         setattr(definition, field, value)
-    session.commit()
+    commit_or_conflict(session, "Assertion name or key already exists in this project")
     session.refresh(definition)
     return definition
 

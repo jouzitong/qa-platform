@@ -8,6 +8,7 @@ export default createRouter({
     { path: '/apis', component: () => import('./views/ApiDefinitionsView.vue'), meta: { title: 'API 管理' } },
     { path: '/assertions', component: () => import('./views/AssertionsView.vue'), meta: { title: '断言管理' } },
     { path: '/flows', component: () => import('./views/FlowsView.vue'), meta: { title: '测试流程' } },
+    { path: '/plans', component: () => import('./views/TestPlansView.vue'), meta: { title: '测试计划' } },
     { path: '/runs', component: () => import('./views/RunsView.vue'), meta: { title: '执行记录' } },
   ],
 })

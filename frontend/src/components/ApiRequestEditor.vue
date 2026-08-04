@@ -16,8 +16,6 @@ const emit = defineEmits<{
 
 const mode = ref<'visual' | 'json'>('visual')
 const rawDraft = ref(props.modelValue)
-const bodyDraft = ref('')
-const bodyError = ref('')
 const messagesDraft = ref('[]')
 const messagesError = ref('')
 
@@ -53,7 +51,6 @@ watch(
   () => props.modelValue,
   (value) => {
     rawDraft.value = value
-    bodyDraft.value = pretty(config.value.body ?? {})
     messagesDraft.value = pretty(config.value.messages ?? [])
   },
   { immediate: true },
@@ -101,13 +98,11 @@ function addMapEntry(field: 'headers' | 'query') {
   updateConfig({ [field]: next })
 }
 
-function applyJsonDraft(
-  draft: string, field: 'body' | 'messages', setError: (message: string) => void,
-) {
+function applyJsonDraft(draft: string, field: 'messages', setError: (message: string) => void) {
   try {
     updateConfig({ [field]: JSON.parse(draft) })
     setError('')
-  } catch { setError(`${field === 'body' ? '请求体' : '消息列表'}不是有效的 JSON`) }
+  } catch { setError('消息列表不是有效的 JSON') }
 }
 
 function applyRaw() {
@@ -124,7 +119,7 @@ function applyRaw() {
     <div class="editor-mode-bar">
       <div>
         <strong>请求构建器</strong>
-        <p class="muted">填写路径时使用 <code>{id}</code> 声明 Path 参数，系统会自动加入参数说明。</p>
+        <p class="muted">填写路径时使用 <code>{id}</code> 声明 Path 参数，参数默认值在下方 Parameters 中维护。</p>
       </div>
       <el-segmented v-model="mode" :options="[{ label: '可视化', value: 'visual' }, { label: '高级 JSON', value: 'json' }]" />
     </div>
@@ -168,11 +163,7 @@ function applyRaw() {
           </section>
         </div>
 
-        <section class="request-section body-section">
-          <div class="section-heading"><div><strong>请求体</strong><span>JSON</span></div><el-button text type="primary" @click="applyJsonDraft(bodyDraft, 'body', (value) => bodyError = value)">应用修改</el-button></div>
-          <el-input v-model="bodyDraft" class="json-input" type="textarea" :rows="7" aria-label="请求体 JSON" @blur="applyJsonDraft(bodyDraft, 'body', (value) => bodyError = value)" />
-          <p v-if="bodyError" class="field-error">{{ bodyError }}</p>
-        </section>
+        <p class="parameter-source-notice">请求体参数请在下方 Parameters 中定义；调用时会按参数位置组装请求，并自动使用默认值。</p>
       </template>
 
       <template v-else>
@@ -187,7 +178,7 @@ function applyRaw() {
     </template>
 
     <div v-else class="advanced-json">
-      <el-alert title="高级模式会直接编辑完整请求覆盖配置" description="适合配置超时、allow_error_status 或暂未可视化的扩展字段。" type="info" :closable="false" show-icon />
+      <el-alert title="高级模式会直接编辑完整请求覆盖配置" description="适合配置超时或暂未可视化的扩展字段；HTTP 非成功状态仍由 API 成功契约判定为失败。" type="info" :closable="false" show-icon />
       <el-input v-model="rawDraft" class="json-input" type="textarea" :rows="18" aria-label="高级请求 JSON" />
       <el-button type="primary" plain @click="applyRaw">应用 JSON</el-button>
     </div>

@@ -8,6 +8,7 @@ from app.execution.expression import ExpressionError, evaluate_expression
 from app.execution.validation import validate_api_response
 from app.main import app
 from app.models import ApiDefinition, AssertionDefinition, AssertionProfile, Project
+from app.success_contract import default_success_contract
 
 
 def test_safe_expression_supports_business_rules_and_blocks_code_execution() -> None:
@@ -26,6 +27,152 @@ def test_safe_expression_supports_business_rules_and_blocks_code_execution() -> 
         evaluate_expression("__import__('os').getenv('HOME')", {})
 
 
+def test_success_assertion_type_is_recorded_and_blocks_when_condition_fails() -> None:
+    from app.execution.assertions import evaluate_assertion_rules
+
+    passed = evaluate_assertion_rules(
+        {"status_code": 200},
+        [{
+            "assertion_id": "success-status",
+            "engine": "path",
+            "config": {"source": "status_code", "operator": "equals", "expected": 200},
+            "severity": "success",
+        }],
+    )
+    assert passed["passed"] is True
+    assert passed["results"][0]["severity"] == "success"
+
+    failed = evaluate_assertion_rules(
+        {"status_code": 500},
+        [{
+            "assertion_id": "success-status",
+            "engine": "path",
+            "config": {"source": "status_code", "operator": "equals", "expected": 200},
+            "severity": "success",
+        }],
+    )
+    assert failed["passed"] is False
+
+    failed_warning = evaluate_assertion_rules(
+        {"status_code": 500},
+        [{
+            "assertion_id": "warning-shaped-success-condition",
+            "engine": "path",
+            "config": {"source": "status_code", "operator": "equals", "expected": 200},
+            "severity": "warning",
+        }],
+    )
+    assert failed_warning["passed"] is False
+    assert failed_warning["results"][0]["severity"] == "success"
+
+
+def test_success_contract_requires_status_and_success_body() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as session:
+        project = Project(name="success-contract-project")
+        session.add(project)
+        session.flush()
+        api = ApiDefinition(
+            project_id=project.id,
+            key="login",
+            name="登录",
+            protocol="http",
+            success_contract=default_success_contract(),
+        )
+        session.add(api)
+        session.commit()
+
+        passed = validate_api_response(
+            session,
+            api,
+            request={},
+            response={"status_code": 200, "body": {"code": 0, "data": {"token": "ok"}}},
+            context={},
+        )
+        assert passed["passed"] is True
+        assert passed["success_contract"] is True
+
+        wrong_body = validate_api_response(
+            session,
+            api,
+            request={},
+            response={"status_code": 200, "body": {"code": 1, "data": {}}},
+            context={},
+        )
+        assert wrong_body["passed"] is False
+
+        wrong_status = validate_api_response(
+            session,
+            api,
+            request={},
+            response={"status_code": 500, "body": {"code": 0, "data": {}}},
+            context={},
+        )
+        assert wrong_status["passed"] is False
+
+        disabled_system_rules = validate_api_response(
+            session,
+            api,
+            request={},
+            response={"status_code": 500, "body": {"code": 1}},
+            context={},
+            step_disabled_assertion_ids=[
+                "system:success-status", "system:success-body-schema"
+            ],
+        )
+        assert disabled_system_rules["passed"] is False
+
+
+def test_success_profile_is_the_source_of_truth_over_legacy_contract() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as session:
+        project = Project(name="success-profile-project")
+        session.add(project)
+        session.flush()
+        definition = AssertionDefinition(
+            project_id=project.id,
+            key="business-ok",
+            name="业务成功",
+            engine="path",
+            config={"source": "body.ok", "operator": "equals", "expected": True},
+            severity="success",
+        )
+        session.add(definition)
+        session.flush()
+        profile = AssertionProfile(
+            project_id=project.id,
+            name="登录成功条件",
+            protocol="http",
+            bindings=[{"assertion_id": definition.id}],
+        )
+        session.add(profile)
+        session.flush()
+        api = ApiDefinition(
+            project_id=project.id,
+            key="profile-driven",
+            name="profile-driven",
+            protocol="http",
+            assertion_profile_id=profile.id,
+            success_contract=default_success_contract(),
+        )
+        session.add(api)
+        session.commit()
+
+        validation = validate_api_response(
+            session,
+            api,
+            request={},
+            response={"status_code": 500, "body": {"ok": True}},
+            context={},
+        )
+
+        assert validation["passed"] is True
+        assert validation["success_contract"] is False
+        assert validation["success_profile_id"] == profile.id
+
+
 def test_default_profile_is_bound_only_to_new_apis() -> None:
     with TestClient(app) as client:
         project = client.post(
@@ -35,12 +182,15 @@ def test_default_profile_is_bound_only_to_new_apis() -> None:
             "/api/v1/assertion-definitions",
             json={
                 "project_id": project["id"],
+                "key": "success-code",
                 "name": "success-code",
                 "engine": "expression",
                 "config": {"expression": "response.body['code'] == 0"},
+                "severity": "success",
             },
         )
         assert definition.status_code == 201
+        assert definition.json()["severity"] == "success"
         profile = client.post(
             "/api/v1/assertion-profiles",
             json={
@@ -57,6 +207,7 @@ def test_default_profile_is_bound_only_to_new_apis() -> None:
             "/api/v1/apis",
             json={
                 "project_id": project["id"],
+                "key": "health-with-default",
                 "name": "health-with-default",
                 "protocol": "http",
                 "request": {"url": "https://example.test"},
@@ -69,6 +220,7 @@ def test_default_profile_is_bound_only_to_new_apis() -> None:
             "/api/v1/apis",
             json={
                 "project_id": project["id"],
+                "key": "health-explicitly-unbound",
                 "name": "health-explicitly-unbound",
                 "protocol": "http",
                 "assertion_profile_id": None,
@@ -79,7 +231,7 @@ def test_default_profile_is_bound_only_to_new_apis() -> None:
         assert unbound.json()["assertion_profile_id"] is None
 
 
-def test_response_variant_collects_profile_schema_and_warning_results() -> None:
+def test_legacy_response_variant_collects_profile_and_schema_results() -> None:
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
     with Session(engine, expire_on_commit=False) as session:
@@ -88,11 +240,12 @@ def test_response_variant_collects_profile_schema_and_warning_results() -> None:
         session.flush()
         definition = AssertionDefinition(
             project_id=project.id,
+            key="latency-warning",
             name="latency-warning",
             engine="expression",
             config={"expression": "response.elapsed_ms < params['max_ms']"},
             default_params={"max_ms": 100},
-            severity="warning",
+            severity="success",
             message="响应较慢",
         )
         session.add(definition)
@@ -107,6 +260,7 @@ def test_response_variant_collects_profile_schema_and_warning_results() -> None:
         session.flush()
         api = ApiDefinition(
             project_id=project.id,
+            key="order-not-found",
             name="order-not-found",
             protocol="http",
             response_variants=[
@@ -143,7 +297,7 @@ def test_response_variant_collects_profile_schema_and_warning_results() -> None:
             request={},
             response={
                 "status_code": 404,
-                "elapsed_ms": 250,
+                "elapsed_ms": 50,
                 "body": {"code": "NOT_FOUND"},
             },
             context={},
@@ -152,5 +306,5 @@ def test_response_variant_collects_profile_schema_and_warning_results() -> None:
         assert validation["passed"] is True
         assert validation["variant"] == "not-found"
         assert len(validation["results"]) == 3
-        assert validation["results"][0]["severity"] == "warning"
-        assert validation["results"][0]["passed"] is False
+        assert validation["results"][0]["severity"] == "success"
+        assert validation["results"][0]["passed"] is True
