@@ -7,6 +7,39 @@ export interface Project {
   updated_at: string
 }
 
+export type ImportAction = 'create' | 'update' | 'unchanged'
+
+export interface ImportPreviewItem {
+  type: string
+  key: string
+  name: string
+  action: ImportAction
+  changes: string[]
+}
+
+export interface ImportSession {
+  id: string
+  project_id: string | null
+  status: 'pending' | 'approved' | 'applied' | 'rejected' | 'failed'
+  filename: string
+  archive_format: string
+  package_version: string
+  source: Record<string, unknown>
+  preview: {
+    package_version?: string
+    target_project_id?: string | null
+    project?: Record<string, unknown>
+    summary?: Record<string, number>
+    items?: ImportPreviewItem[]
+  }
+  errors: string[]
+  warnings: string[]
+  created_at: string
+  updated_at: string
+  reviewed_at: string | null
+  applied_at: string | null
+}
+
 export interface ApiDefinition {
   id: string
   project_id: string

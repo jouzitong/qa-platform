@@ -1,21 +1,26 @@
 <script setup lang="ts">
 import { Delete, Edit } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 
 import { api } from '../api/client'
+import PaginationBar from '../components/PaginationBar.vue'
+import { useProjectContext } from '../state/project'
 import type { Project } from '../types'
 import { parseJson, pretty } from '../utils'
 
 const loading = ref(false)
-const projects = ref<Project[]>([])
+const { projects, refreshProjects } = useProjectContext()
 const dialog = ref(false)
 const editingId = ref('')
+const page = ref(1)
+const pageSize = ref(20)
 const form = reactive({ name: '', description: '', variables: '{\n  "base_url": "https://api.example.com"\n}' })
+const pagedProjects = computed(() => projects.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value))
 
 async function load() {
   loading.value = true
-  try { projects.value = await api.projects.list() }
+  try { await refreshProjects() }
   catch (error) { ElMessage.error((error as Error).message) }
   finally { loading.value = false }
 }
@@ -54,16 +59,22 @@ onMounted(load)
 </script>
 
 <template>
-  <div class="page-head">
-    <div><h2>项目空间</h2><p>每个项目拥有独立的 API 资产、环境变量和测试流程。</p></div>
+  <Teleport to="#page-header-content">
+    <div class="page-header-content-inner">
     <el-button type="primary" @click="openCreate">新建项目</el-button>
-  </div>
+    </div>
+  </Teleport>
+  <Teleport to="#page-footer-content">
+    <div class="page-footer-content-inner">
+      <PaginationBar v-model:page="page" v-model:page-size="pageSize" :total="projects.length" />
+    </div>
+  </Teleport>
   <el-card class="panel" shadow="never">
-    <el-table v-loading="loading" :data="projects">
-      <el-table-column prop="name" label="名称" min-width="180" />
-      <el-table-column prop="description" label="说明" min-width="260" show-overflow-tooltip />
-      <el-table-column label="变量" min-width="260"><template #default="scope"><el-tag v-for="(_, key) in scope.row.variables" :key="key" size="small" effect="plain" style="margin-right: 6px">{{ key }}</el-tag></template></el-table-column>
-      <el-table-column label="操作" width="150" align="right"><template #default="scope"><el-button class="icon-action-button" link type="primary" :icon="Edit" aria-label="编辑" @click="openEdit(scope.row)"><span class="icon-action-label">编辑</span></el-button><el-button class="icon-action-button" link type="danger" :icon="Delete" aria-label="删除" @click="remove(scope.row)"><span class="icon-action-label">删除</span></el-button></template></el-table-column>
+    <el-table class="list-table" v-loading="loading" :data="pagedProjects">
+      <el-table-column prop="name" label="名称" fixed="left" min-width="180" align="center" show-overflow-tooltip />
+      <el-table-column prop="description" label="说明" min-width="260" align="left" show-overflow-tooltip />
+      <el-table-column label="变量" min-width="260" align="left"><template #default="scope"><el-tag v-for="(_, key) in scope.row.variables" :key="key" size="small" effect="plain" style="margin-right: 6px">{{ key }}</el-tag></template></el-table-column>
+      <el-table-column label="操作" fixed="right" width="150" align="center"><template #default="scope"><div class="icon-action-group"><el-button class="icon-action-button" link type="primary" :icon="Edit" aria-label="编辑" @click="openEdit(scope.row)"><span class="icon-action-label">编辑</span></el-button><el-button class="icon-action-button" link type="danger" :icon="Delete" aria-label="删除" @click="remove(scope.row)"><span class="icon-action-label">删除</span></el-button></div></template></el-table-column>
     </el-table>
     <div v-if="!loading && !projects.length" class="empty-state">创建第一个项目，开始沉淀测试资产。</div>
   </el-card>

@@ -18,6 +18,23 @@ from app.success_contract import default_success_contract
 
 router = APIRouter(prefix="/apis", tags=["apis"])
 
+DEFAULT_HTTP_HEADERS = {
+    "X-trade-id": "{{ random.uuid(32) }}",
+    "Accept": "application/json",
+}
+
+
+def _with_default_http_headers(request: dict[str, Any]) -> dict[str, Any]:
+    result = deep_merge({}, request)
+    headers = result.get("headers")
+    normalized_headers = dict(headers) if isinstance(headers, dict) else {}
+    existing_names = {str(name).lower() for name in normalized_headers}
+    for name, value in DEFAULT_HTTP_HEADERS.items():
+        if name.lower() not in existing_names:
+            normalized_headers[name] = value
+    result["headers"] = normalized_headers
+    return result
+
 
 def _validate_template(
     session: Session,
@@ -86,7 +103,9 @@ def _validate_success_contract(protocol: str, contract: dict[str, Any]) -> None:
             minimum = int(status_codes.get("min", 200))
             maximum = int(status_codes.get("max", 299))
         except (TypeError, ValueError):
-            raise HTTPException(status_code=422, detail="status_codes min/max must be integers")
+            raise HTTPException(
+                status_code=422, detail="status_codes min/max must be integers"
+            ) from None
         if not 100 <= minimum <= maximum <= 599:
             raise HTTPException(status_code=422, detail="status_codes must be within 100..599")
     schema = contract.get("body_schema")
@@ -134,6 +153,8 @@ def create_api(payload: ApiCreate, session: Session = Depends(get_session)) -> A
         success_contract = default_success_contract("ws")
     _validate_success_contract(payload.protocol, success_contract)
     values = payload.model_dump(exclude={"assertion_profile_id"})
+    if payload.protocol == "http":
+        values["request"] = _with_default_http_headers(payload.request)
     values["success_contract"] = success_contract
     definition = ApiDefinition(
         **values,

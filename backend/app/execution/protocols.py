@@ -15,7 +15,7 @@ class ExecutionResult:
 
 async def execute_http(config: dict[str, Any]) -> ExecutionResult:
     method = str(config.get("method", "GET")).upper()
-    url = _resolve_url(config)
+    url = _resolve_url(config, scheme="http")
     if not url:
         raise ValueError("HTTP API requires request.url")
 
@@ -53,7 +53,7 @@ async def execute_http(config: dict[str, Any]) -> ExecutionResult:
 
 
 async def execute_ws(config: dict[str, Any]) -> ExecutionResult:
-    url = _resolve_url(config)
+    url = _resolve_url(config, scheme="ws")
     if not url:
         raise ValueError("WebSocket API requires request.url")
 
@@ -102,11 +102,23 @@ def _mask_headers(headers: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _resolve_url(config: dict[str, Any]) -> str | None:
+def _resolve_url(config: dict[str, Any], *, scheme: str = "http") -> str | None:
     if config.get("url"):
-        return str(config["url"])
+        return _normalize_url(str(config["url"]), scheme)
     base_url = config.get("base_url")
     if not base_url:
         return None
     path = str(config.get("path", ""))
-    return f"{str(base_url).rstrip('/')}/{path.lstrip('/')}" if path else str(base_url)
+    resolved = f"{str(base_url).rstrip('/')}/{path.lstrip('/')}" if path else str(base_url)
+    return _normalize_url(resolved, scheme)
+
+
+def _normalize_url(value: str, scheme: str) -> str:
+    address = value.strip()
+    if not address or address.startswith('/'):
+        return address
+    if address.startswith('//'):
+        return f"{scheme}:{address}"
+    if '://' in address:
+        return address
+    return f"{scheme}://{address}"

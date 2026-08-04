@@ -1,27 +1,70 @@
 <script setup lang="ts">
 import { View } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 
 import { api } from '../api/client'
-import type { TestFlow, TestRun } from '../types'
+import PaginationBar from '../components/PaginationBar.vue'
+import { useProjectContext } from '../state/project'
+import type { TestFlow, TestPlan, TestRun } from '../types'
 import { parseJson, pretty, shortId } from '../utils'
 
 const flows = ref<TestFlow[]>([])
+const plans = ref<TestPlan[]>([])
 const runs = ref<TestRun[]>([])
+const selectedPlanId = ref('')
 const launchDialog = ref(false)
 const detailDialog = ref(false)
 const selected = ref<TestRun | null>(null)
 const liveEvents = ref<object[]>([])
+const page = ref(1)
+const pageSize = ref(20)
 const launch = reactive({ flow_id: '', inputs: '{}' })
+const { projectId } = useProjectContext()
 const flowNames = computed(() => Object.fromEntries(flows.value.map((flow) => [flow.id, flow.name])))
+const filteredRuns = computed(() => {
+  if (!selectedPlanId.value) return runs.value
+
+  const plan = plans.value.find((item) => item.id === selectedPlanId.value)
+  if (!plan) return []
+
+  const flowIds = new Set(
+    plan.items
+      .filter((item) => item.type === 'flow')
+      .map((item) => item.target_id),
+  )
+  return runs.value.filter((run) => flowIds.has(run.flow_id))
+})
+const pagedRuns = computed(() => filteredRuns.value.slice(
+  (page.value - 1) * pageSize.value,
+  page.value * pageSize.value,
+))
 
 function totalDuration(run: TestRun): string {
   return run.step_runs.reduce((sum, step) => sum + step.duration_ms, 0).toFixed(0)
 }
 
 async function load() {
-  try { ;[flows.value, runs.value] = await Promise.all([api.flows.list(), api.runs.list()]) }
+  if (!projectId.value) {
+    flows.value = []
+    plans.value = []
+    runs.value = []
+    selectedPlanId.value = ''
+    return
+  }
+  try {
+    const [nextFlows, nextPlans, nextRuns] = await Promise.all([
+      api.flows.list(projectId.value),
+      api.testPlans.list(projectId.value),
+      api.runs.list(),
+    ])
+    flows.value = nextFlows
+    plans.value = nextPlans
+    runs.value = nextRuns
+    if (selectedPlanId.value && !nextPlans.some((plan) => plan.id === selectedPlanId.value)) {
+      selectedPlanId.value = ''
+    }
+  }
   catch (error) { ElMessage.error((error as Error).message) }
 }
 
@@ -57,25 +100,51 @@ function openDetail(run: TestRun) {
   detailDialog.value = true
 }
 
-onMounted(load)
+watch(projectId, () => {
+  page.value = 1
+  selectedPlanId.value = ''
+  void load()
+}, { immediate: true })
 </script>
 
 <template>
-  <div class="page-head">
-    <div><h2>执行记录</h2><p>查看流程运行状态、每次重试、请求响应和最终上下文。</p></div>
-    <div><el-button @click="load">刷新</el-button><el-button type="primary" :disabled="!flows.length" @click="openLaunch()">运行流程</el-button></div>
-  </div>
+  <Teleport to="#page-header-content">
+    <div class="page-header-content-inner">
+      <el-select
+        v-model="selectedPlanId"
+        clearable
+        filterable
+        placeholder="按测试计划筛选"
+        style="width: 220px"
+        @change="page = 1"
+      >
+        <el-option
+          v-for="plan in plans"
+          :key="plan.id"
+          :label="`${plan.version} · ${plan.name}`"
+          :value="plan.id"
+        />
+      </el-select>
+      <el-button @click="load">刷新</el-button>
+      <el-button type="primary" :disabled="!flows.length" @click="openLaunch()">运行流程</el-button>
+    </div>
+  </Teleport>
+  <Teleport to="#page-footer-content">
+    <div class="page-footer-content-inner">
+      <PaginationBar v-model:page="page" v-model:page-size="pageSize" :total="filteredRuns.length" />
+    </div>
+  </Teleport>
   <el-card class="panel" shadow="never">
-    <el-table :data="runs" @row-click="openDetail">
-      <el-table-column label="运行 ID" width="130"><template #default="scope"><code>{{ shortId(scope.row.id) }}</code></template></el-table-column>
-      <el-table-column label="流程" min-width="180"><template #default="scope">{{ flowNames[scope.row.flow_id] || shortId(scope.row.flow_id) }}</template></el-table-column>
-      <el-table-column label="状态" width="130"><template #default="scope"><strong :class="`status-${scope.row.status}`">● {{ scope.row.status }}</strong></template></el-table-column>
-      <el-table-column label="尝试次数" width="110"><template #default="scope">{{ scope.row.step_runs.length }}</template></el-table-column>
-      <el-table-column label="开始时间" min-width="190"><template #default="scope">{{ new Date(scope.row.created_at).toLocaleString() }}</template></el-table-column>
-      <el-table-column label="耗时" width="110"><template #default="scope">{{ totalDuration(scope.row) }} ms</template></el-table-column>
-      <el-table-column label="" width="90"><template #default="scope"><el-button class="icon-action-button" link type="primary" :icon="View" aria-label="详情" @click.stop="openDetail(scope.row)"><span class="icon-action-label">详情</span></el-button></template></el-table-column>
+    <el-table class="list-table" :data="pagedRuns" @row-click="openDetail">
+      <el-table-column label="流程" fixed="left" min-width="180" align="center"><template #default="scope">{{ flowNames[scope.row.flow_id] || shortId(scope.row.flow_id) }}</template></el-table-column>
+      <el-table-column label="状态" width="130" align="center"><template #default="scope"><strong :class="`status-${scope.row.status}`">● {{ scope.row.status }}</strong></template></el-table-column>
+      <el-table-column label="开始时间" min-width="190" align="center"><template #default="scope">{{ new Date(scope.row.created_at).toLocaleString() }}</template></el-table-column>
+      <el-table-column label="耗时" width="110" align="center"><template #default="scope">{{ totalDuration(scope.row) }} ms</template></el-table-column>
+      <el-table-column label="尝试次数" width="110" align="center"><template #default="scope">{{ scope.row.step_runs.length }}</template></el-table-column>
+      <el-table-column label="运行 ID" width="130" align="center"><template #default="scope"><code>{{ shortId(scope.row.id) }}</code></template></el-table-column>
+      <el-table-column label="操作" fixed="right" width="130" align="center"><template #default="scope"><div class="icon-action-group"><el-button class="icon-action-button" link type="primary" :icon="View" aria-label="详情" @click.stop="openDetail(scope.row)"><span class="icon-action-label">详情</span></el-button></div></template></el-table-column>
     </el-table>
-    <div v-if="!runs.length" class="empty-state">还没有执行记录。</div>
+    <div v-if="!filteredRuns.length" class="empty-state">{{ selectedPlanId ? '该测试计划暂无流程执行记录。' : '还没有执行记录。' }}</div>
   </el-card>
 
   <el-dialog v-model="launchDialog" title="运行测试流程" width="620px">

@@ -50,6 +50,10 @@ def test_project_api_round_trip() -> None:
         )
         assert response.status_code == 201
         assert response.json()["key"] == "health"
+        assert response.json()["request"]["headers"] == {
+            "X-trade-id": "{{ random.uuid(32) }}",
+            "Accept": "application/json",
+        }
         api_id = response.json()["id"]
 
         websocket_response = client.post(

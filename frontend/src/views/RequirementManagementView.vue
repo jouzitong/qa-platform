@@ -2,7 +2,6 @@
 import {
   ArrowRight,
   CircleCheck,
-  Clock,
   Document,
   EditPen,
   List,
@@ -33,6 +32,14 @@ interface RequirementRow {
   acceptance: string[]
 }
 
+interface DocumentNode {
+  id: string
+  label: string
+  kind: 'root' | 'group' | 'requirement' | 'release' | 'document'
+  documentId?: string
+  children?: DocumentNode[]
+}
+
 const route = useRoute()
 const router = useRouter()
 
@@ -41,7 +48,7 @@ const sections = [
   { key: 'prototypes', path: '/requirements/prototypes', label: '产品原型', icon: EditPen },
   { key: 'tasks', path: '/requirements/tasks', label: '开发任务', icon: SetUp },
   { key: 'releases', path: '/requirements/releases', label: '发布计划', icon: Promotion },
-  { key: 'documents', path: '/requirements/documents', label: '交付文档', icon: Document },
+  { key: 'documents', path: '/requirements/documents', label: '文档中心', icon: Document },
 ]
 
 const activeSection = computed(() => (
@@ -108,15 +115,24 @@ const releasePlans = [
   { id: 'REL-2026-07', name: '2026.07 稳定版', version: 'v0.1.1', status: '已发布', owner: '项目组', window: '07/30 20:00 - 21:00', requirements: 1, done: 1, test: '通过', readiness: 100 },
 ]
 
-const documents = [
-  { name: '2026.08 平台迭代升级计划', type: '升级计划', release: '2026.08 平台迭代', status: '草稿', updatedAt: '今天 11:05', format: 'Markdown' },
-  { name: '2026.08 平台迭代操作手册', type: '操作手册', release: '2026.08 平台迭代', status: '待生成', updatedAt: '-', format: 'Markdown' },
-  { name: '2026.08 平台迭代回退手册', type: '回退手册', release: '2026.08 平台迭代', status: '待生成', updatedAt: '-', format: 'Markdown' },
-  { name: '稳定版发布脚本', type: '发布脚本', release: '2026.07 稳定版', status: '已归档', updatedAt: '07/30 18:20', format: 'Shell' },
+const allDocuments = [
+  { id: 'DOC-001', name: '支持项目资产导入审批 - 需求文档', type: '需求文档', requirement: 'REQ-001', release: '2026.08 平台迭代', status: '已确认', owner: '产品组', updatedAt: '今天 09:45', format: 'Markdown' },
+  { id: 'DOC-002', name: '导入审批工作台 - 产品原型', type: '产品原型', requirement: 'REQ-001', release: '2026.08 平台迭代', status: '评审中', owner: '产品组', updatedAt: '今天 09:30', format: 'Prototype' },
+  { id: 'DOC-003', name: '导入审批模块 - 概要设计', type: '概要设计', requirement: 'REQ-001', release: '2026.08 平台迭代', status: '已完成', owner: '张三', updatedAt: '昨天 18:10', format: 'Markdown' },
+  { id: 'DOC-004', name: '导入审批模块 - 详细设计', type: '详细设计', requirement: 'REQ-001', release: '2026.08 平台迭代', status: '开发中', owner: '张三', updatedAt: '昨天 17:20', format: 'Markdown' },
+  { id: 'DOC-005', name: '发布前回归测试计划', type: '测试计划', requirement: 'REQ-001 / REQ-002', release: '2026.08 平台迭代', status: '已确认', owner: '李四', updatedAt: '昨天 16:40', format: 'Markdown' },
+  { id: 'DOC-006', name: '发布前回归测试报告', type: '测试报告', requirement: 'REQ-001 / REQ-002', release: '2026.08 平台迭代', status: '待生成', owner: '测试组', updatedAt: '-', format: 'Markdown' },
+  { id: 'DOC-007', name: '2026.08 平台迭代 - 发布说明', type: '发布说明', requirement: 'REQ-001 / REQ-002', release: '2026.08 平台迭代', status: '草稿', owner: '项目组', updatedAt: '今天 11:05', format: 'Markdown' },
+  { id: 'DOC-008', name: '2026.08 平台迭代 - 升级操作手册', type: '升级手册', requirement: 'REQ-001 / REQ-002', release: '2026.08 平台迭代', status: '待生成', owner: '运维组', updatedAt: '-', format: 'Markdown' },
+  { id: 'DOC-009', name: '2026.08 平台迭代 - 回退操作手册', type: '回退手册', requirement: 'REQ-001 / REQ-002', release: '2026.08 平台迭代', status: '待生成', owner: '运维组', updatedAt: '-', format: 'Markdown' },
+  { id: 'DOC-010', name: '2026.07 稳定版 - 发布脚本', type: '发布脚本', requirement: 'REQ-003', release: '2026.07 稳定版', status: '已归档', owner: '运维组', updatedAt: '07/30 18:20', format: 'Shell' },
 ]
 
 const requirementStatus = ref<'全部' | RequirementStatus>('全部')
 const requirementKeyword = ref('')
+const documentKeyword = ref('')
+const documentType = ref('全部')
+const documentTypes = ['全部', '需求文档', '产品原型', '概要设计', '详细设计', '测试计划', '测试报告', '发布说明', '升级手册', '回退手册', '发布脚本']
 const selectedRequirement = ref<RequirementRow | null>(null)
 const createDialogVisible = ref(false)
 const createForm = reactive({ title: '', type: '平台能力', priority: '中' as RequirementRow['priority'], owner: '我', description: '' })
@@ -127,6 +143,98 @@ const filteredRequirements = computed(() => requirements.value.filter((item) => 
   const matchesKeyword = !keyword || `${item.id} ${item.title} ${item.owner}`.toLowerCase().includes(keyword)
   return matchesStatus && matchesKeyword
 }))
+
+const filteredDocuments = computed(() => allDocuments.filter((item) => {
+  const keyword = documentKeyword.value.trim().toLowerCase()
+  const matchesType = documentType.value === '全部' || item.type === documentType.value
+  const matchesKeyword = !keyword || `${item.id} ${item.name} ${item.requirement} ${item.release}`.toLowerCase().includes(keyword)
+  return matchesType && matchesKeyword
+}))
+
+const documentSummary = computed(() => ({
+  total: allDocuments.length,
+  confirmed: allDocuments.filter((item) => ['已确认', '已完成', '已归档'].includes(item.status)).length,
+  inProgress: allDocuments.filter((item) => ['评审中', '开发中', '草稿'].includes(item.status)).length,
+  pending: allDocuments.filter((item) => item.status === '待生成').length,
+}))
+
+const releaseDocumentTypes = ['发布说明', '升级手册', '回退手册', '发布脚本']
+const documentMatches = (item: (typeof allDocuments)[number]) => {
+  const keyword = documentKeyword.value.trim().toLowerCase()
+  const matchesType = documentType.value === '全部' || item.type === documentType.value
+  const matchesKeyword = !keyword || `${item.id} ${item.name} ${item.requirement} ${item.release}`.toLowerCase().includes(keyword)
+  return matchesType && matchesKeyword
+}
+
+const documentTree = computed<DocumentNode[]>(() => {
+  const requirementNodes = requirements.value.reduce<DocumentNode[]>((nodes, requirement) => {
+    const items = allDocuments.filter((item) => (
+      item.requirement === requirement.id && !releaseDocumentTypes.includes(item.type) && documentMatches(item)
+    ))
+    if (!items.length) return nodes
+    nodes.push({
+      id: `requirement:${requirement.id}`,
+      label: `${requirement.id}  ${requirement.title}`,
+      kind: 'requirement' as const,
+      children: items.map((item) => ({
+        id: `document:${item.id}`,
+        label: `${item.type} · ${item.name}`,
+        kind: 'document' as const,
+        documentId: item.id,
+      })),
+    })
+    return nodes
+  }, [])
+
+  const sharedTestDocuments = allDocuments.filter((item) => (
+    item.requirement.includes(' / ') && !releaseDocumentTypes.includes(item.type) && documentMatches(item)
+  ))
+  const releaseNodes = releasePlans.reduce<DocumentNode[]>((nodes, release) => {
+    const items = allDocuments.filter((item) => (
+      item.release === release.name && releaseDocumentTypes.includes(item.type) && documentMatches(item)
+    ))
+    if (!items.length) return nodes
+    nodes.push({
+      id: `release:${release.id}`,
+      label: `${release.name}  ${release.version}`,
+      kind: 'release' as const,
+      children: items.map((item) => ({
+        id: `document:${item.id}`,
+        label: `${item.type} · ${item.name}`,
+        kind: 'document' as const,
+        documentId: item.id,
+      })),
+    })
+    return nodes
+  }, [])
+
+  const groups: DocumentNode[] = []
+  if (requirementNodes.length) groups.push({ id: 'document-requirements', label: '需求文档', kind: 'group', children: requirementNodes })
+  if (sharedTestDocuments.length) groups.push({
+    id: 'document-shared-tests',
+    label: '共享测试文档',
+    kind: 'group',
+    children: sharedTestDocuments.map((item) => ({
+      id: `document:${item.id}`,
+      label: `${item.type} · ${item.name}`,
+      kind: 'document' as const,
+      documentId: item.id,
+    })),
+  })
+  if (releaseNodes.length) groups.push({ id: 'document-releases', label: '发布计划文档', kind: 'group', children: releaseNodes })
+  return [{ id: 'document-root', label: '当前项目 · 文档库', kind: 'root', children: groups }]
+})
+
+const documentDefaultExpandedKeys = ['document-root', 'document-requirements', 'document-shared-tests', 'document-releases']
+const selectedDocumentId = ref('DOC-001')
+const selectedDocument = computed(() => (
+  allDocuments.find((item) => item.id === selectedDocumentId.value && documentMatches(item))
+  || filteredDocuments.value[0]
+  || null
+))
+const selectDocumentNode = (node: DocumentNode) => {
+  if (node.kind === 'document' && node.documentId) selectedDocumentId.value = node.documentId
+}
 
 const openCreateDialog = () => {
   Object.assign(createForm, { title: '', type: '平台能力', priority: '中', owner: '我', description: '' })
@@ -255,22 +363,70 @@ const statusType = (status: string) => {
           <div class="release-card-head"><div><p class="eyebrow">{{ release.id }}</p><h3>{{ release.name }}</h3><span>{{ release.version }} · {{ release.window }}</span></div><el-tag :type="statusType(release.status)" effect="plain">{{ release.status }}</el-tag></div>
           <div class="release-readiness"><div><span>发布就绪度</span><strong>{{ release.readiness }}%</strong></div><el-progress :percentage="release.readiness" :stroke-width="8" :show-text="false" status="success" /></div>
           <div class="release-facts"><div><small>关联需求</small><strong>{{ release.done }} / {{ release.requirements }} 已完成</strong></div><div><small>发布前测试</small><strong>{{ release.test }}</strong></div><div><small>负责人</small><strong>{{ release.owner }}</strong></div></div>
-          <div class="release-card-actions"><el-button text type="primary" :icon="View" @click="ElMessage.info('发布计划详情将在后端接入后开放')">查看详情</el-button><el-button text :icon="Document" @click="navigate('/requirements/documents')">交付文档</el-button></div>
+          <div class="release-card-actions"><el-button text type="primary" :icon="View" @click="ElMessage.info('发布计划详情将在后端接入后开放')">查看详情</el-button><el-button text :icon="Document" @click="navigate('/requirements/documents')">文档汇总</el-button></div>
         </el-card>
       </div>
     </template>
 
     <template v-else>
       <el-card class="panel" shadow="never">
-        <template #header><div class="requirement-card-heading"><div><strong>交付文档与脚本</strong><span>发布前生成并审核升级、操作和回退材料</span></div><el-button type="primary" :icon="Document" @click="ElMessage.info('文档生成将在后端接入后开放')">生成文档</el-button></div></template>
-        <el-table class="list-table" :data="documents">
-          <el-table-column label="文档名称" min-width="280"><template #default="scope"><div class="document-name-cell"><div class="document-icon"><el-icon><Document /></el-icon></div><div><strong>{{ scope.row.name }}</strong><small>{{ scope.row.format }}</small></div></div></template></el-table-column>
-          <el-table-column prop="type" label="类型" width="120" align="center" /><el-table-column prop="release" label="发布计划" min-width="180" /><el-table-column prop="status" label="状态" width="110" align="center"><template #default="scope"><el-tag :type="statusType(scope.row.status)" size="small" effect="plain">{{ scope.row.status }}</el-tag></template></el-table-column>
-          <el-table-column prop="updatedAt" label="更新时间" width="140" align="center" /><el-table-column label="操作" fixed="right" width="120" align="center"><template #default><el-button link type="primary" :icon="View" @click="ElMessage.info('文档预览将在后端接入后开放')">预览</el-button></template></el-table-column>
-        </el-table>
+        <template #header><div class="requirement-card-heading"><div><strong>项目文档汇总</strong><span>按需求、产品、研发、测试和发布阶段统一管理文档与脚本</span></div><el-button type="primary" :icon="Document" @click="ElMessage.info('文档生成将在后端接入后开放')">生成文档</el-button></div></template>
+        <div class="document-summary">
+          <div class="document-stat"><span>文档总数</span><strong>{{ documentSummary.total }}</strong></div>
+          <div class="document-stat is-success"><span>已确认 / 已归档</span><strong>{{ documentSummary.confirmed }}</strong></div>
+          <div class="document-stat is-warning"><span>编写 / 评审中</span><strong>{{ documentSummary.inProgress }}</strong></div>
+          <div class="document-stat is-info"><span>待生成</span><strong>{{ documentSummary.pending }}</strong></div>
+        </div>
+        <div class="requirement-toolbar document-toolbar">
+          <el-input v-model="documentKeyword" clearable placeholder="搜索文档名称、需求或发布计划" :prefix-icon="Search" />
+          <el-select v-model="documentType" class="document-type-select" placeholder="按文档类型筛选"><el-option v-for="type in documentTypes" :key="type" :label="type" :value="type" /></el-select>
+        </div>
+        <div class="document-organizer">
+          <div class="document-tree-panel">
+            <div class="document-tree-heading"><strong>文档组织</strong><span>{{ filteredDocuments.length }} 份匹配</span></div>
+            <el-tree
+              class="document-tree"
+              :data="documentTree"
+              node-key="id"
+              :default-expanded-keys="documentDefaultExpandedKeys"
+              :expand-on-click-node="false"
+              highlight-current
+              :current-node-key="selectedDocument ? `document:${selectedDocument.id}` : undefined"
+              @node-click="selectDocumentNode"
+            >
+              <template #default="{ data }">
+                <div class="document-tree-node">
+                  <el-icon v-if="data.kind === 'root'"><Document /></el-icon>
+                  <el-icon v-else-if="data.kind === 'group'"><List /></el-icon>
+                  <el-icon v-else-if="data.kind === 'requirement'"><Tickets /></el-icon>
+                  <el-icon v-else-if="data.kind === 'release'"><Promotion /></el-icon>
+                  <el-icon v-else><Document /></el-icon>
+                  <span>{{ data.label }}</span>
+                </div>
+              </template>
+            </el-tree>
+          </div>
+          <div v-if="selectedDocument" class="document-detail-panel">
+            <div class="document-detail-heading">
+              <div class="document-detail-title"><div class="document-icon"><el-icon><Document /></el-icon></div><div><p class="eyebrow">{{ selectedDocument.id }} · {{ selectedDocument.format }}</p><h3>{{ selectedDocument.name }}</h3></div></div>
+              <el-tag :type="statusType(selectedDocument.status)" effect="plain">{{ selectedDocument.status }}</el-tag>
+            </div>
+            <el-descriptions class="document-detail-descriptions" :column="2" border size="small">
+              <el-descriptions-item label="文档类型">{{ selectedDocument.type }}</el-descriptions-item>
+              <el-descriptions-item label="负责人">{{ selectedDocument.owner }}</el-descriptions-item>
+              <el-descriptions-item label="关联需求">{{ selectedDocument.requirement }}</el-descriptions-item>
+              <el-descriptions-item label="发布计划">{{ selectedDocument.release }}</el-descriptions-item>
+              <el-descriptions-item label="更新时间">{{ selectedDocument.updatedAt }}</el-descriptions-item>
+              <el-descriptions-item label="文档状态">{{ selectedDocument.status }}</el-descriptions-item>
+            </el-descriptions>
+            <div class="document-detail-section"><div class="drawer-section-heading"><strong>文档说明</strong></div><p class="document-detail-description">该文档属于 {{ selectedDocument.requirement }} 的交付资料，当前在 {{ selectedDocument.release }} 中统一维护。后端接入后将在这里提供版本、评审记录和正文预览。</p></div>
+            <div class="document-detail-actions"><el-button type="primary" :icon="View" @click="ElMessage.info('文档预览将在后端接入后开放')">预览文档</el-button><el-button :icon="EditPen" @click="ElMessage.info('文档编辑将在后端接入后开放')">编辑文档</el-button></div>
+          </div>
+          <el-empty v-else class="document-empty" description="没有匹配的文档" />
+        </div>
       </el-card>
-      <el-alert class="document-notice" title="发布计划是上线的唯一入口" type="info" :closable="false" show-icon>
-        需求完成、延期或明确豁免后，才能进入发布计划的发布前检查；升级计划、操作手册、回退手册和脚本都应绑定到具体发布计划。
+      <el-alert class="document-notice" title="完整需求的文档集合" type="info" :closable="false" show-icon>
+        每个需求都可以沉淀需求文档、产品原型、概要设计、详细设计、测试计划和测试报告；进入发布计划后，再补充发布说明、升级手册、回退手册及操作脚本。
       </el-alert>
     </template>
 
@@ -326,9 +482,12 @@ const statusType = (status: string) => {
 .prototype-canvas-blocks { display: flex; gap: 8px; margin-top: 16px; }.prototype-canvas-blocks i { display: block; flex: 1; height: 37px; border-radius: 5px; background: #d1fadf; }
 .prototype-meta { display: flex; justify-content: space-between; color: #98a2b3; font-size: 11px; }.prototype-sections { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 12px; }.prototype-action { width: 100%; margin-top: 14px; }
 .release-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }.release-card { padding: 20px; }.release-card h3 { margin: 5px 0 5px; color: #101828; font-size: 17px; }.release-card-head span { color: #667085; font-size: 11px; }.release-readiness { padding: 16px 0; margin: 18px 0; border-top: 1px solid #f2f4f7; border-bottom: 1px solid #f2f4f7; }.release-readiness > div { display: flex; justify-content: space-between; margin-bottom: 9px; color: #667085; font-size: 12px; }.release-readiness strong { color: #067647; font-size: 15px; }.release-facts { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }.release-facts div { min-width: 0; }.release-facts small, .release-facts strong { display: block; }.release-facts small { color: #98a2b3; font-size: 11px; }.release-facts strong { overflow: hidden; margin-top: 5px; color: #344054; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }.release-card-actions { display: flex; justify-content: flex-end; margin-top: 16px; }
-.document-name-cell { justify-content: flex-start; }.document-name-cell > div:last-child { min-width: 0; }.document-name-cell strong, .document-name-cell small { display: block; }.document-notice { margin-top: 0; }
+.document-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; padding: 16px; margin-bottom: 16px; border: 1px solid #eaecf0; border-radius: 9px; background: #fcfcfd; }
+.document-stat { display: flex; min-height: 56px; flex-direction: column; justify-content: space-between; padding-left: 12px; border-left: 3px solid #98a2b3; }.document-stat span { color: #667085; font-size: 11px; }.document-stat strong { color: #344054; font-size: 21px; line-height: 1; }.document-stat.is-success { border-color: #12b76a; }.document-stat.is-success strong { color: #067647; }.document-stat.is-warning { border-color: #f79009; }.document-stat.is-warning strong { color: #b54708; }.document-stat.is-info { border-color: #53b1fd; }.document-stat.is-info strong { color: #175cd3; }
+.document-toolbar { margin-bottom: 14px; }.document-type-select { width: 160px; }.document-name-cell { justify-content: flex-start; }.document-name-cell > div:last-child { min-width: 0; }.document-name-cell strong, .document-name-cell small { display: block; }.document-notice { margin-top: 0; }
+.document-organizer { display: grid; grid-template-columns: minmax(280px, .72fr) minmax(0, 1.28fr); min-height: 430px; border: 1px solid #eaecf0; border-radius: 9px; overflow: hidden; background: #fff; }.document-tree-panel { min-width: 0; padding: 14px 8px 14px 14px; border-right: 1px solid #eaecf0; background: #fcfcfd; }.document-tree-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 8px 10px; border-bottom: 1px solid #eaecf0; }.document-tree-heading strong { color: #344054; font-size: 12px; }.document-tree-heading span { color: #98a2b3; font-size: 11px; }.document-tree { padding-top: 8px; background: transparent; }.document-tree :deep(.el-tree-node__content) { height: 34px; border-radius: 6px; }.document-tree :deep(.el-tree-node__content:hover), .document-tree :deep(.is-current > .el-tree-node__content) { background: #ecfdf3; }.document-tree :deep(.el-tree-node__label) { min-width: 0; }.document-tree-node { display: flex; align-items: center; gap: 7px; min-width: 0; color: #475467; font-size: 12px; }.document-tree-node span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.document-tree-node .el-icon { flex: 0 0 auto; color: #667085; }.document-tree :deep(.is-current > .el-tree-node__content .document-tree-node) { color: #067647; font-weight: 600; }.document-detail-panel { min-width: 0; padding: 22px; }.document-detail-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; padding-bottom: 18px; border-bottom: 1px solid #eaecf0; }.document-detail-title { display: flex; align-items: center; gap: 12px; min-width: 0; }.document-detail-title > div:last-child { min-width: 0; }.document-detail-title h3 { margin: 5px 0 0; overflow: hidden; color: #101828; font-size: 17px; text-overflow: ellipsis; white-space: nowrap; }.document-detail-descriptions { margin-top: 18px; }.document-detail-section { padding-top: 20px; margin-top: 20px; border-top: 1px solid #eaecf0; }.document-detail-description { margin: 0; color: #667085; font-size: 12px; line-height: 1.7; }.document-detail-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 24px; }.document-empty { min-height: 280px; }
 .requirement-drawer-head { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 20px; }.requirement-drawer-head > div { min-width: 0; flex: 1; }.requirement-drawer-head h3 { margin: 5px 0 7px; color: #101828; font-size: 18px; }.requirement-drawer-head p:last-child { margin: 0; color: #667085; font-size: 12px; line-height: 1.6; }
 .drawer-section { padding-top: 22px; margin-top: 22px; border-top: 1px solid #eaecf0; }.drawer-section-heading { align-items: center; margin-bottom: 11px; color: #344054; font-size: 13px; }.drawer-section-heading > span { color: #667085; font-size: 12px; }.acceptance-list { display: flex; flex-direction: column; gap: 10px; padding: 0; margin: 0; list-style: none; color: #475467; font-size: 12px; }.acceptance-list li { display: flex; align-items: flex-start; gap: 7px; line-height: 1.5; }.acceptance-list .el-icon { flex: 0 0 auto; margin-top: 2px; color: #12b76a; }.drawer-next-actions { display: flex; flex-direction: column; align-items: stretch; gap: 8px; }.create-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-@media (max-width: 1050px) { .requirement-metrics { grid-template-columns: repeat(2, 1fr); }.prototype-grid { grid-template-columns: 1fr 1fr; }.requirement-toolbar { align-items: flex-start; flex-direction: column; }.requirement-toolbar .el-input { width: 100%; } }
-@media (max-width: 720px) { .requirement-flow { align-items: flex-start; flex-direction: column; }.requirement-flow-step { width: 100%; }.requirement-flow-step .el-icon { display: none; }.prototype-grid, .release-grid { grid-template-columns: 1fr; }.requirement-head-actions { align-items: flex-end; flex-direction: column; }.create-form-grid { grid-template-columns: 1fr; gap: 0; } }
+@media (max-width: 1050px) { .requirement-metrics, .document-summary { grid-template-columns: repeat(2, 1fr); }.prototype-grid { grid-template-columns: 1fr 1fr; }.requirement-toolbar { align-items: flex-start; flex-direction: column; }.requirement-toolbar .el-input, .document-type-select { width: 100%; }.document-organizer { grid-template-columns: 1fr; }.document-tree-panel { border-right: 0; border-bottom: 1px solid #eaecf0; }.document-tree { max-height: 280px; overflow: auto; } }
+@media (max-width: 720px) { .requirement-flow { align-items: flex-start; flex-direction: column; }.requirement-flow-step { width: 100%; }.requirement-flow-step .el-icon { display: none; }.prototype-grid, .release-grid { grid-template-columns: 1fr; }.requirement-head-actions { align-items: flex-end; flex-direction: column; }.create-form-grid { grid-template-columns: 1fr; gap: 0; }.document-summary { grid-template-columns: 1fr 1fr; }.document-detail-panel { padding: 16px; }.document-detail-heading { flex-direction: column; }.document-detail-descriptions :deep(.el-descriptions__body) { font-size: 11px; } }
 </style>

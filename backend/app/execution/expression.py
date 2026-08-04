@@ -2,6 +2,8 @@ import ast
 import operator
 import re
 from collections.abc import Callable
+from secrets import choice, randbelow, token_hex
+from string import ascii_letters, digits
 from typing import Any
 
 
@@ -29,7 +31,9 @@ _COMPARE_OPERATORS: dict[type[ast.cmpop], Callable[[Any, Any], bool]] = {
     ast.Is: operator.is_,
     ast.IsNot: operator.is_not,
 }
-_ALLOWED_NAMES = {"response", "request", "context", "params", "True", "False", "None"}
+_ALLOWED_NAMES = {
+    "response", "request", "context", "params", "random", "True", "False", "None"
+}
 
 
 def _contains(container: Any, value: Any) -> bool:
@@ -52,6 +56,69 @@ def _match(pattern: str, value: Any) -> bool:
     return re.search(pattern, str(value)) is not None
 
 
+def _integer_argument(value: Any, label: str) -> int:
+    if isinstance(value, bool):
+        raise ExpressionError(f"random.{label} requires an integer")
+    try:
+        result = int(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ExpressionError(f"random.{label} requires an integer") from None
+    if result != value:
+        raise ExpressionError(f"random.{label} requires an integer")
+    return result
+
+
+def _length(value: Any, label: str, *, maximum: int = 256) -> int:
+    result = _integer_argument(value, label)
+    if not 1 <= result <= maximum:
+        raise ExpressionError(f"random.{label} length must be between 1 and {maximum}")
+    return result
+
+
+def _random_uuid(length: int = 32) -> str:
+    size = _length(length, "uuid", maximum=128)
+    return token_hex((size + 1) // 2)[:size]
+
+
+def _random_string(length: int = 16) -> str:
+    size = _length(length, "string")
+    alphabet = ascii_letters + digits
+    return "".join(choice(alphabet) for _ in range(size))
+
+
+def _random_int(minimum: int = 0, maximum: int | None = None) -> int:
+    lower = _integer_argument(minimum, "int")
+    upper = lower if maximum is None else _integer_argument(maximum, "int")
+    if maximum is None:
+        lower = 0
+    if lower > upper:
+        raise ExpressionError("random.int minimum must be less than or equal to maximum")
+    return lower + randbelow(upper - lower + 1)
+
+
+def _random_float(minimum: float = 0.0, maximum: float = 1.0) -> float:
+    try:
+        lower = float(minimum)
+        upper = float(maximum)
+    except (TypeError, ValueError, OverflowError):
+        raise ExpressionError("random.float requires numeric bounds") from None
+    if lower > upper:
+        raise ExpressionError("random.float minimum must be less than or equal to maximum")
+    # Use a cryptographically seeded source without exposing Python's global RNG state.
+    fraction = randbelow(2**53) / 2**53
+    return lower + (upper - lower) * fraction
+
+
+_RANDOM_FUNCTIONS: dict[str, Callable[..., Any]] = {
+    "uuid": _random_uuid,
+    "string": _random_string,
+    "int": _random_int,
+    "integer": _random_int,
+    "float": _random_float,
+}
+_RANDOM_NAMESPACE = _RANDOM_FUNCTIONS
+
+
 _FUNCTIONS: dict[str, Callable[..., Any]] = {
     "len": len,
     "contains": _contains,
@@ -67,6 +134,7 @@ _FUNCTIONS: dict[str, Callable[..., Any]] = {
 def evaluate_expression(expression: str, variables: dict[str, Any]) -> Any:
     tree = parse_expression(expression)
     scope = {name: variables.get(name, {}) for name in _ALLOWED_NAMES if name in variables}
+    scope["random"] = _RANDOM_NAMESPACE
     return _evaluate(tree.body, scope)
 
 
@@ -134,7 +202,17 @@ def _validate(tree: ast.AST) -> None:
         elif isinstance(node, ast.Attribute) and node.attr.startswith("_"):
             raise ExpressionError("Private attributes are not allowed")
         elif isinstance(node, ast.Call):
-            if not isinstance(node.func, ast.Name) or node.func.id not in _FUNCTIONS:
+            if isinstance(node.func, ast.Name):
+                call_allowed = node.func.id in _FUNCTIONS
+            elif isinstance(node.func, ast.Attribute):
+                call_allowed = (
+                    isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "random"
+                    and node.func.attr in _RANDOM_FUNCTIONS
+                )
+            else:
+                call_allowed = False
+            if not call_allowed:
                 raise ExpressionError("Only whitelisted helper functions can be called")
             if node.keywords:
                 raise ExpressionError("Keyword arguments are not supported")
@@ -214,6 +292,6 @@ def _evaluate(node: ast.AST, scope: dict[str, Any]) -> Any:
             left = right
         return True
     if isinstance(node, ast.Call):
-        function = _FUNCTIONS[node.func.id]  # type: ignore[union-attr]
+        function = _evaluate(node.func, scope)
         return function(*[_evaluate(argument, scope) for argument in node.args])
     raise ExpressionError(f"Unsupported expression element: {type(node).__name__}")

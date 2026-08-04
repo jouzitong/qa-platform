@@ -1,17 +1,22 @@
 <script setup lang="ts">
 import { Delete, Edit } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { onMounted, reactive, ref, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 
 import { api } from '../api/client'
-import type { AssertionDefinition, AssertionProfile, Project } from '../types'
+import PaginationBar from '../components/PaginationBar.vue'
+import { useProjectContext } from '../state/project'
+import type { AssertionDefinition, AssertionProfile } from '../types'
 import { parseJson, pretty } from '../utils'
 
-const projects = ref<Project[]>([])
 const definitions = ref<AssertionDefinition[]>([])
 const profiles = ref<AssertionProfile[]>([])
-const projectId = ref('')
+const { projectId } = useProjectContext()
 const activeTab = ref<'definitions' | 'profiles'>('definitions')
+const definitionPage = ref(1)
+const definitionPageSize = ref(20)
+const profilePage = ref(1)
+const profilePageSize = ref(20)
 const definitionDialog = ref(false)
 const profileDialog = ref(false)
 const editingDefinitionId = ref('')
@@ -34,6 +39,14 @@ const profileForm = reactive({
   is_default: false,
   bindings: '[]',
 })
+const pagedDefinitions = computed(() => definitions.value.slice(
+  (definitionPage.value - 1) * definitionPageSize.value,
+  definitionPage.value * definitionPageSize.value,
+))
+const pagedProfiles = computed(() => profiles.value.slice(
+  (profilePage.value - 1) * profilePageSize.value,
+  profilePage.value * profilePageSize.value,
+))
 
 async function load() {
   if (!projectId.value) { definitions.value = []; profiles.value = []; return }
@@ -170,51 +183,65 @@ async function removeProfile(row: AssertionProfile) {
   } catch (error) { ElMessage.error((error as Error).message) }
 }
 
-watch(projectId, load)
-onMounted(async () => {
-  try {
-    projects.value = await api.projects.list()
-    projectId.value = projects.value[0]?.id || ''
-  } catch (error) { ElMessage.error((error as Error).message) }
+watch(projectId, () => {
+  definitionPage.value = 1
+  profilePage.value = 1
+  void load()
+}, { immediate: true })
+watch(activeTab, (tab) => {
+  if (tab === 'definitions') definitionPage.value = 1
+  else profilePage.value = 1
 })
 </script>
 
 <template>
-  <div class="page-head">
-    <div><h2>成功条件</h2><p>定义 API 必须满足的成功标准；任一条件不满足，执行结果就是失败。</p></div>
-    <el-button v-if="activeTab === 'definitions'" type="primary" :disabled="!projectId" @click="openDefinitionCreate">新建成功条件</el-button>
-    <el-button v-else type="primary" :disabled="!projectId" @click="openProfileCreate">新建成功集合</el-button>
-  </div>
-  <div class="toolbar">
-    <el-select v-model="projectId" placeholder="选择项目" style="width: 260px">
-      <el-option v-for="project in projects" :key="project.id" :label="project.name" :value="project.id" />
-    </el-select>
-    <el-radio-group v-model="activeTab">
-      <el-radio-button value="definitions">原子成功条件</el-radio-button>
-      <el-radio-button value="profiles">成功条件集合</el-radio-button>
-    </el-radio-group>
-  </div>
+  <Teleport to="#page-header-content">
+    <div class="page-header-content-inner">
+      <el-radio-group v-model="activeTab">
+        <el-radio-button value="definitions">原子成功条件</el-radio-button>
+        <el-radio-button value="profiles">成功条件集合</el-radio-button>
+      </el-radio-group>
+      <el-button v-if="activeTab === 'definitions'" type="primary" :disabled="!projectId" @click="openDefinitionCreate">新建成功条件</el-button>
+      <el-button v-else type="primary" :disabled="!projectId" @click="openProfileCreate">新建成功集合</el-button>
+    </div>
+  </Teleport>
+  <Teleport to="#page-footer-content">
+    <div class="page-footer-content-inner">
+      <PaginationBar
+        v-if="activeTab === 'definitions'"
+        v-model:page="definitionPage"
+        v-model:page-size="definitionPageSize"
+        :total="definitions.length"
+      />
+      <PaginationBar
+        v-else
+        v-model:page="profilePage"
+        v-model:page-size="profilePageSize"
+        :total="profiles.length"
+      />
+    </div>
+  </Teleport>
 
   <el-card v-if="activeTab === 'definitions'" class="panel" shadow="never">
-    <el-table :data="definitions">
-      <el-table-column prop="key" label="Key" min-width="180" show-overflow-tooltip />
-      <el-table-column prop="name" label="名称" min-width="180" />
-      <el-table-column label="引擎" width="130"><template #default="scope"><el-tag effect="plain">{{ scope.row.engine }}</el-tag></template></el-table-column>
-      <el-table-column prop="description" label="用途" min-width="220" show-overflow-tooltip />
-      <el-table-column label="配置" min-width="300" show-overflow-tooltip><template #default="scope"><code>{{ pretty(scope.row.config) }}</code></template></el-table-column>
-      <el-table-column label="操作" width="140" align="right"><template #default="scope"><el-button class="icon-action-button" link type="primary" :icon="Edit" aria-label="编辑" @click="openDefinitionEdit(scope.row)"><span class="icon-action-label">编辑</span></el-button><el-button class="icon-action-button" link type="danger" :icon="Delete" aria-label="删除" @click="removeDefinition(scope.row)"><span class="icon-action-label">删除</span></el-button></template></el-table-column>
+    <el-table class="list-table" :data="pagedDefinitions">
+      <el-table-column prop="name" label="名称" fixed="left" min-width="180" align="center" show-overflow-tooltip />
+      <el-table-column prop="key" label="Key" min-width="180" align="center" show-overflow-tooltip />
+      <el-table-column label="引擎" width="130" align="center"><template #default="scope"><el-tag effect="plain">{{ scope.row.engine }}</el-tag></template></el-table-column>
+      <el-table-column prop="description" label="用途" min-width="220" align="left" show-overflow-tooltip />
+      <el-table-column label="配置" min-width="300" align="left" show-overflow-tooltip><template #default="scope"><code>{{ pretty(scope.row.config) }}</code></template></el-table-column>
+      <el-table-column label="操作" fixed="right" width="140" align="center"><template #default="scope"><div class="icon-action-group"><el-button class="icon-action-button" link type="primary" :icon="Edit" aria-label="编辑" @click="openDefinitionEdit(scope.row)"><span class="icon-action-label">编辑</span></el-button><el-button class="icon-action-button" link type="danger" :icon="Delete" aria-label="删除" @click="removeDefinition(scope.row)"><span class="icon-action-label">删除</span></el-button></div></template></el-table-column>
     </el-table>
     <div v-if="projectId && !definitions.length" class="empty-state">当前项目还没有成功条件。</div>
   </el-card>
 
   <el-card v-else class="panel" shadow="never">
-    <el-table :data="profiles">
-      <el-table-column prop="name" label="集合名称" min-width="190" />
-      <el-table-column label="协议" width="100"><template #default="scope"><el-tag>{{ scope.row.protocol.toUpperCase() }}</el-tag></template></el-table-column>
-      <el-table-column label="默认" width="90"><template #default="scope"><el-tag v-if="scope.row.is_default" type="success">默认</el-tag><span v-else class="muted">—</span></template></el-table-column>
-      <el-table-column label="成功条件" min-width="280"><template #default="scope"><el-space wrap><el-tag v-for="binding in scope.row.bindings" :key="String(binding.assertion_id)" effect="plain">{{ definitionName(binding.assertion_id) }}</el-tag><span v-if="!scope.row.bindings.length" class="muted">空集合</span></el-space></template></el-table-column>
-      <el-table-column label="引用 API" width="100"><template #default="scope">{{ scope.row.usage_count }}</template></el-table-column>
-      <el-table-column label="操作" width="140" align="right"><template #default="scope"><el-button class="icon-action-button" link type="primary" :icon="Edit" aria-label="编辑" @click="openProfileEdit(scope.row)"><span class="icon-action-label">编辑</span></el-button><el-button class="icon-action-button" link type="danger" :icon="Delete" aria-label="删除" @click="removeProfile(scope.row)"><span class="icon-action-label">删除</span></el-button></template></el-table-column>
+    <el-table class="list-table" :data="pagedProfiles">
+      <el-table-column prop="name" label="集合名称" fixed="left" min-width="190" align="center" show-overflow-tooltip />
+      <el-table-column label="协议" width="100" align="center"><template #default="scope"><el-tag>{{ scope.row.protocol.toUpperCase() }}</el-tag></template></el-table-column>
+      <el-table-column label="成功条件" min-width="280" align="left"><template #default="scope"><el-space wrap><el-tag v-for="binding in scope.row.bindings" :key="String(binding.assertion_id)" effect="plain">{{ definitionName(binding.assertion_id) }}</el-tag><span v-if="!scope.row.bindings.length" class="muted">空集合</span></el-space></template></el-table-column>
+      <el-table-column label="默认" width="90" align="center"><template #default="scope"><el-tag v-if="scope.row.is_default" type="success">默认</el-tag><span v-else class="muted">—</span></template></el-table-column>
+      <el-table-column label="引用 API" width="100" align="center"><template #default="scope">{{ scope.row.usage_count }}</template></el-table-column>
+      <el-table-column label="操作" fixed="right" width="140" align="center"><template #default="scope"><div class="icon-action-group"><el-button class="icon-action-button" link type="primary" :icon="Edit" aria-label="编辑" @click="openProfileEdit(scope.row)"><span class="icon-action-label">编辑</span></el-button><el-button class="icon-action-button" link type="danger" :icon="Delete" aria-label="删除" @click="removeProfile(scope.row)"><span class="icon-action-label">删除</span></el-button></div></template></el-table-column>
     </el-table>
     <div v-if="projectId && !profiles.length" class="empty-state">创建一个默认成功集合后，新 API 会自动绑定它。</div>
   </el-card>

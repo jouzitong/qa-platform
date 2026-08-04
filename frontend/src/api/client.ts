@@ -1,6 +1,7 @@
 import type {
   ApiDefinition,
   ApiTemplate,
+  ImportSession,
   AssertionDefinition,
   AssertionProfile,
   Project,
@@ -19,7 +20,13 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   })
   if (!response.ok) {
     const payload = await response.json().catch(() => null)
-    throw new Error(payload?.detail || `请求失败 (${response.status})`)
+    const detail = payload?.detail
+    if (typeof detail === 'object' && detail) {
+      const message = typeof detail.message === 'string' ? detail.message : '请求失败'
+      const errors = Array.isArray(detail.errors) ? `：${detail.errors.join('；')}` : ''
+      throw new Error(`${message}${errors}`)
+    }
+    throw new Error(detail || `请求失败 (${response.status})`)
   }
   if (response.status === 204) return undefined as T
   return response.json() as Promise<T>
@@ -33,6 +40,35 @@ export const api = {
     update: (id: string, payload: Partial<Project>) =>
       request<Project>(`/projects/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
     remove: (id: string) => request<void>(`/projects/${id}`, { method: 'DELETE' }),
+  },
+  imports: {
+    preview: (file: File, projectId?: string) => request<ImportSession>(
+      `/imports/preview${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ''}`,
+      {
+        method: 'POST',
+        body: file,
+        headers: {
+          'Content-Type': file.type || 'application/zip',
+          'X-Import-Filename': encodeURIComponent(file.name),
+          'X-Import-Source': 'workspace',
+        },
+      },
+    ),
+    get: (id: string) => request<ImportSession>(`/imports/${id}`),
+    approve: (id: string) => request<ImportSession>(`/imports/${id}/approve`, { method: 'POST' }),
+    reject: (id: string) => request<ImportSession>(`/imports/${id}/reject`, { method: 'POST' }),
+    oneClick: (file: File, projectId?: string) => request<ImportSession>(
+      `/imports/one-click${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ''}`,
+      {
+        method: 'POST',
+        body: file,
+        headers: {
+          'Content-Type': file.type || 'application/zip',
+          'X-Import-Filename': encodeURIComponent(file.name),
+          'X-Import-Source': 'external',
+        },
+      },
+    ),
   },
   definitions: {
     list: (projectId?: string) =>

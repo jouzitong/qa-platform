@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { Delete, Edit } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { onMounted, reactive, ref, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 
 import { api } from '../api/client'
-import type { ApiDefinition, FlowStep, Project, TestFlow } from '../types'
+import PaginationBar from '../components/PaginationBar.vue'
+import { useProjectContext } from '../state/project'
+import type { ApiDefinition, FlowStep, TestFlow } from '../types'
 import { parseJson, pretty } from '../utils'
 
 interface EditableStep {
@@ -21,13 +23,15 @@ interface EditableStep {
   backoff_multiplier: number
 }
 
-const projects = ref<Project[]>([])
 const definitions = ref<ApiDefinition[]>([])
 const flows = ref<TestFlow[]>([])
-const projectId = ref('')
+const { projectId } = useProjectContext()
 const dialog = ref(false)
 const editingId = ref('')
+const page = ref(1)
+const pageSize = ref(20)
 const form = reactive({ key: '', name: '', description: '', variables: '{}', steps: [] as EditableStep[] })
+const pagedFlows = computed(() => flows.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value))
 
 async function load() {
   if (!projectId.value) { definitions.value = []; flows.value = []; return }
@@ -112,30 +116,32 @@ async function remove(row: TestFlow) {
   ElMessage.success('流程已删除')
 }
 
-watch(projectId, load)
-onMounted(async () => {
-  try { projects.value = await api.projects.list(); projectId.value = projects.value[0]?.id || '' }
-  catch (error) { ElMessage.error((error as Error).message) }
-})
+watch(projectId, () => {
+  page.value = 1
+  void load()
+}, { immediate: true })
 </script>
 
 <template>
-  <div class="page-head">
-    <div><h2>测试流程</h2><p>按顺序组合 API，管理上下文、成功条件、结果提取与失败重试。</p></div>
-    <el-button type="primary" :disabled="!projectId || !definitions.length" @click="openCreate">新建流程</el-button>
-  </div>
-  <div class="toolbar">
-    <el-select v-model="projectId" placeholder="选择项目" style="width: 260px"><el-option v-for="project in projects" :key="project.id" :label="project.name" :value="project.id" /></el-select>
-    <span v-if="projectId && !definitions.length" class="muted">请先为项目登记 API。</span>
-  </div>
+  <Teleport to="#page-header-content">
+    <div class="page-header-content-inner">
+      <el-tag v-if="projectId && !definitions.length" type="warning" effect="plain">请先登记 API</el-tag>
+      <el-button type="primary" :disabled="!projectId || !definitions.length" @click="openCreate">新建流程</el-button>
+    </div>
+  </Teleport>
+  <Teleport to="#page-footer-content">
+    <div class="page-footer-content-inner">
+      <PaginationBar v-model:page="page" v-model:page-size="pageSize" :total="flows.length" />
+    </div>
+  </Teleport>
   <el-card class="panel" shadow="never">
-    <el-table :data="flows">
-      <el-table-column prop="key" label="Key" min-width="180" show-overflow-tooltip />
-      <el-table-column prop="name" label="流程" min-width="190" />
-      <el-table-column prop="description" label="说明" min-width="250" show-overflow-tooltip />
-      <el-table-column label="步骤" width="100"><template #default="scope"><el-tag effect="plain">{{ scope.row.steps.length }} steps</el-tag></template></el-table-column>
-      <el-table-column label="变量" width="100"><template #default="scope">{{ Object.keys(scope.row.variables).length }}</template></el-table-column>
-      <el-table-column label="操作" width="140" align="right"><template #default="scope"><el-button class="icon-action-button" link type="primary" :icon="Edit" aria-label="编辑" @click="openEdit(scope.row)"><span class="icon-action-label">编辑</span></el-button><el-button class="icon-action-button" link type="danger" :icon="Delete" aria-label="删除" @click="remove(scope.row)"><span class="icon-action-label">删除</span></el-button></template></el-table-column>
+    <el-table class="list-table" :data="pagedFlows">
+      <el-table-column prop="name" label="名称" fixed="left" min-width="190" align="center" show-overflow-tooltip />
+      <el-table-column prop="key" label="Key" min-width="180" align="center" show-overflow-tooltip />
+      <el-table-column label="步骤" width="100" align="center"><template #default="scope"><el-tag effect="plain">{{ scope.row.steps.length }} 步</el-tag></template></el-table-column>
+      <el-table-column label="变量" width="100" align="center"><template #default="scope">{{ Object.keys(scope.row.variables).length }}</template></el-table-column>
+      <el-table-column prop="description" label="说明" min-width="250" align="left" show-overflow-tooltip />
+      <el-table-column label="操作" fixed="right" width="140" align="center"><template #default="scope"><div class="icon-action-group"><el-button class="icon-action-button" link type="primary" :icon="Edit" aria-label="编辑" @click="openEdit(scope.row)"><span class="icon-action-label">编辑</span></el-button><el-button class="icon-action-button" link type="danger" :icon="Delete" aria-label="删除" @click="remove(scope.row)"><span class="icon-action-label">删除</span></el-button></div></template></el-table-column>
     </el-table>
     <div v-if="projectId && !flows.length" class="empty-state">还没有测试流程。</div>
   </el-card>

@@ -3,7 +3,12 @@ from copy import deepcopy
 from typing import Any
 from urllib.parse import quote
 
+from app.execution.expression import evaluate_expression
+
 TEMPLATE_PATTERN = re.compile(r"{{\s*([\w.-]+)\s*}}")
+RANDOM_TEMPLATE_PATTERN = re.compile(
+    r"{{\s*(random\.(?:uuid|string|int|integer|float)\s*\([^{}]*\))\s*}}"
+)
 PATH_PARAMETER_PATTERN = re.compile(r"(?<!{)\{([A-Za-z_][A-Za-z0-9_]*)}(?!})")
 COLON_PATH_PARAMETER_PATTERN = re.compile(r"(?<=/):([A-Za-z_][A-Za-z0-9_]*)")
 
@@ -30,6 +35,13 @@ def render(value: Any, context: dict[str, Any]) -> Any:
     if not isinstance(value, str):
         return value
 
+    random_match = RANDOM_TEMPLATE_PATTERN.fullmatch(value)
+    if random_match:
+        return evaluate_expression(random_match.group(1), context)
+
+    value = RANDOM_TEMPLATE_PATTERN.sub(
+        lambda match: str(evaluate_expression(match.group(1), context)), value
+    )
     full_match = TEMPLATE_PATTERN.fullmatch(value)
     if full_match:
         return deepcopy(get_path(context, full_match.group(1)))

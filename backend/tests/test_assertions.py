@@ -27,6 +27,18 @@ def test_safe_expression_supports_business_rules_and_blocks_code_execution() -> 
         evaluate_expression("__import__('os').getenv('HOME')", {})
 
 
+def test_random_expression_helpers_support_lengths_and_ranges() -> None:
+    uuid_value = evaluate_expression("random.uuid(32)", {})
+    string_value = evaluate_expression("random.string(10)", {})
+    integer_value = evaluate_expression("random.int(5, 8)", {})
+    float_value = evaluate_expression("random.float(1.5, 2.5)", {})
+
+    assert len(uuid_value) == 32
+    assert len(string_value) == 10
+    assert 5 <= integer_value <= 8
+    assert 1.5 <= float_value <= 2.5
+
+
 def test_success_assertion_type_is_recorded_and_blocks_when_condition_fails() -> None:
     from app.execution.assertions import evaluate_assertion_rules
 

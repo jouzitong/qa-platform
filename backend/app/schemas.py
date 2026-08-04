@@ -28,6 +28,23 @@ class ProjectRead(ProjectCreate, ORMModel):
     updated_at: datetime
 
 
+class ImportSessionRead(ORMModel):
+    id: str
+    project_id: str | None
+    status: Literal["pending", "approved", "applied", "rejected", "failed"]
+    filename: str
+    archive_format: str
+    package_version: str
+    source: dict[str, Any]
+    preview: dict[str, Any]
+    errors: list[str]
+    warnings: list[str]
+    created_at: datetime
+    updated_at: datetime
+    reviewed_at: datetime | None
+    applied_at: datetime | None
+
+
 class ApiCreate(BaseModel):
     project_id: str
     key: str = Field(min_length=1, max_length=120)

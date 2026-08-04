@@ -41,6 +41,26 @@ class Project(TimestampMixin, Base):
     test_plans: Mapped[list["TestPlan"]] = relationship(cascade="all, delete-orphan")
 
 
+class ImportSession(TimestampMixin, Base):
+    __tablename__ = "import_sessions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str | None] = mapped_column(
+        ForeignKey("projects.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    filename: Mapped[str] = mapped_column(String(255), default="import.zip")
+    archive_format: Mapped[str] = mapped_column(String(20), default="zip")
+    package_version: Mapped[str] = mapped_column(String(60), default="1.0")
+    source: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    package: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    preview: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    errors: Mapped[list[str]] = mapped_column(JSON, default=list)
+    warnings: Mapped[list[str]] = mapped_column(JSON, default=list)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class ApiTemplate(TimestampMixin, Base):
     __tablename__ = "api_templates"
     __table_args__ = (UniqueConstraint("project_id", "name", name="uq_template_project_name"),)
