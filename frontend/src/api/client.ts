@@ -11,7 +11,13 @@ import type {
   TestRun,
 } from '../types'
 
-const API_ROOT = import.meta.env.VITE_API_ROOT || '/api/v1'
+export const API_ROOT = import.meta.env.VITE_API_ROOT || '/api/v1'
+
+export function websocketUrl(path: string): string {
+  const url = new URL(`${API_ROOT}${path}`, window.location.origin)
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+  return url.toString()
+}
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(`${API_ROOT}${path}`, {

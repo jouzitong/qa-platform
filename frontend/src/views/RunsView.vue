@@ -3,7 +3,7 @@ import { View } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { computed, reactive, ref, watch } from 'vue'
 
-import { api } from '../api/client'
+import { api, websocketUrl } from '../api/client'
 import PaginationBar from '../components/PaginationBar.vue'
 import { useProjectContext } from '../state/project'
 import type { TestFlow, TestPlan, TestRun } from '../types'
@@ -79,8 +79,7 @@ async function start() {
 }
 
 function watchRun(runId: string) {
-  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const socket = new WebSocket(`${protocol}//${location.host}/api/v1/ws/runs/${runId}`)
+  const socket = new WebSocket(websocketUrl(`/ws/runs/${runId}`))
   socket.onmessage = async (message) => {
     const event = JSON.parse(message.data)
     liveEvents.value.unshift(event)
