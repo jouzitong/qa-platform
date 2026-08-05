@@ -9,8 +9,8 @@ cd "${ROOT_DIR}/frontend"
 npm run build
 
 rm -rf "${ROOT_DIR}/dist"
-mkdir -p "${ROOT_DIR}/dist/server"
-cp -R "${ROOT_DIR}/frontend/dist/." "${ROOT_DIR}/dist/"
+mkdir -p "${ROOT_DIR}/dist/client" "${ROOT_DIR}/dist/server"
+cp -R "${ROOT_DIR}/frontend/dist/." "${ROOT_DIR}/dist/client/"
 cp "${ROOT_DIR}/sites/worker/index.js" "${ROOT_DIR}/dist/server/index.js"
 
 echo "[qa-platform] Sites build prepared in ${ROOT_DIR}/dist"
