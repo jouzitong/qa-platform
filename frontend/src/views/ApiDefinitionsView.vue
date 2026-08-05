@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Delete, Edit, VideoPlay } from '@element-plus/icons-vue'
+import { Delete, Edit, Search, VideoPlay } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, reactive, ref, watch } from 'vue'
 
@@ -20,6 +20,7 @@ const templateDialog = ref(false)
 const executeDialog = ref(false)
 const apiPage = ref(1)
 const apiPageSize = ref(20)
+const apiSearch = ref('')
 const templatePage = ref(1)
 const templatePageSize = ref(20)
 const editingId = ref('')
@@ -46,7 +47,15 @@ const availableTemplates = computed(() =>
 const availableProfiles = computed(() =>
   profiles.value.filter((profile) => profile.protocol === form.protocol),
 )
-const pagedDefinitions = computed(() => definitions.value.slice(
+const filteredDefinitions = computed(() => {
+  const keyword = apiSearch.value.trim().toLocaleLowerCase()
+  if (!keyword) return definitions.value
+  return definitions.value.filter((definition) => (
+    definition.name.toLocaleLowerCase().includes(keyword)
+    || requestTarget(definition).toLocaleLowerCase().includes(keyword)
+  ))
+})
+const pagedDefinitions = computed(() => filteredDefinitions.value.slice(
   (apiPage.value - 1) * apiPageSize.value, apiPage.value * apiPageSize.value,
 ))
 const pagedTemplates = computed(() => templates.value.slice(
@@ -74,6 +83,20 @@ function withProtocol(value: string, protocol: 'http' | 'ws') {
   return `${protocolScheme(protocol)}://${address}`
 }
 
+const defaultRequestBase = '{{ base_url }}'
+
+function composeRequestEndpoint(
+  base: unknown,
+  path: unknown,
+  protocol: 'http' | 'ws',
+) {
+  const normalizedBase = withProtocol(String(base || defaultRequestBase), protocol).replace(/\/$/, '')
+  const normalizedPath = String(path || '').trim()
+  if (!normalizedPath) return normalizedBase
+  if (normalizedPath.includes('://')) return withProtocol(normalizedPath, protocol)
+  return `${normalizedBase}/${normalizedPath.replace(/^\//, '')}`
+}
+
 function defaultHttpHeaders() {
   return {
     'X-trade-id': '{{ random.uuid(32) }}',
@@ -97,20 +120,17 @@ const requestAddress = computed(() => {
 })
 const requestAddressPlaceholder = computed(() => inheritedRequestBase.value
   ? (form.protocol === 'http' ? '/users/{user_id}' : '/channels/{channel_id}')
-  : (form.protocol === 'http' ? 'http://{{ base_url }}/users/{user_id}' : 'ws://{{ base_url }}/channels/{channel_id}'))
+  : (form.protocol === 'http' ? '/users/{user_id}' : '/channels/{channel_id}'))
 const requestMethod = computed(() => form.protocol === 'ws'
   ? 'WS'
   : String(requestConfig.value.method || 'GET').toUpperCase())
 const requestEndpoint = computed(() => {
   const request = requestConfig.value
-  if (request.url) return withProtocol(String(request.url), form.protocol)
+  const directUrl = String(request.url || '').trim()
+  if (directUrl && !directUrl.startsWith('/')) return withProtocol(directUrl, form.protocol)
   const template = findTemplate(form.template_id)
-  const base = String(template?.request.base_url || template?.request.url || request.base_url || '')
-  const path = String(request.path || '')
-  if (base && path) {
-    return `${withProtocol(base, form.protocol).replace(/\/$/, '')}/${path.replace(/^\//, '')}`
-  }
-  return path || (form.protocol === 'ws' ? '填写 WebSocket 地址' : '填写请求路径')
+  const base = request.base_url || template?.request.base_url || template?.request.url
+  return composeRequestEndpoint(base, request.path || directUrl, form.protocol)
 })
 
 async function load() {
@@ -126,8 +146,8 @@ async function load() {
 
 function defaultRequest(protocol: 'http' | 'ws') {
   return protocol === 'http'
-    ? { method: 'GET', url: '{{ base_url }}/health', headers: defaultHttpHeaders(), query: {} }
-    : { url: '{{ base_url }}', headers: {}, messages: [{ type: 'ping' }], receive_count: 1 }
+    ? { method: 'GET', path: '/health', headers: defaultHttpHeaders(), query: {} }
+    : { path: '/', headers: {}, messages: [{ type: 'ping' }], receive_count: 1 }
 }
 
 function defaultSuccessContract(protocol: 'http' | 'ws') {
@@ -278,12 +298,10 @@ function effectiveRequest(definition: ApiDefinition) {
 function requestTarget(definition: ApiDefinition) {
   const request = effectiveRequest(definition)
   const method = request.method || (definition.protocol === 'ws' ? 'WS' : '')
-  if (request.url) return `${method} ${withProtocol(String(request.url), definition.protocol)}`.trim()
-  const base = String(request.base_url || '')
-  const path = String(request.path || '')
-  const target = base
-    ? `${withProtocol(base, definition.protocol).replace(/\/$/, '')}/${path.replace(/^\//, '')}`
-    : path
+  const directUrl = String(request.url || '').trim()
+  const target = directUrl && !directUrl.startsWith('/')
+    ? withProtocol(directUrl, definition.protocol)
+    : composeRequestEndpoint(request.base_url, request.path || directUrl, definition.protocol)
   return `${method} ${target}`.trim()
 }
 
@@ -493,17 +511,30 @@ watch(activeTab, (tab) => {
   if (tab === 'apis') apiPage.value = 1
   else templatePage.value = 1
 })
+watch(apiSearch, () => { apiPage.value = 1 })
 </script>
 
 <template>
   <Teleport to="#page-header-content">
-    <div class="page-header-content-inner">
-      <el-radio-group v-model="activeTab">
-        <el-radio-button value="apis">API 列表</el-radio-button>
-        <el-radio-button value="templates">API 模板</el-radio-button>
-      </el-radio-group>
-      <el-button v-if="activeTab === 'apis'" type="primary" :disabled="!projectId" @click="openCreate">登记 API</el-button>
-      <el-button v-else type="primary" :disabled="!projectId" @click="openTemplateCreate">新建模板</el-button>
+    <div class="page-header-content-inner" :class="{ 'api-list-page-header': activeTab === 'apis' }">
+      <div class="api-list-header-main">
+        <el-radio-group v-model="activeTab">
+          <el-radio-button value="apis">API 列表</el-radio-button>
+          <el-radio-button value="templates">API 模板</el-radio-button>
+        </el-radio-group>
+        <el-button v-if="activeTab === 'apis'" type="primary" :disabled="!projectId" @click="openCreate">登记 API</el-button>
+        <el-button v-else type="primary" :disabled="!projectId" @click="openTemplateCreate">新建模板</el-button>
+      </div>
+      <div v-if="activeTab === 'apis'" class="api-list-header-search">
+        <el-input
+          v-model="apiSearch"
+          class="api-list-search"
+          :prefix-icon="Search"
+          clearable
+          placeholder="搜索名称或 URL"
+          aria-label="搜索 API 名称或 URL"
+        />
+      </div>
     </div>
   </Teleport>
   <Teleport to="#page-footer-content">
@@ -512,7 +543,7 @@ watch(activeTab, (tab) => {
         v-if="activeTab === 'apis'"
         v-model:page="apiPage"
         v-model:page-size="apiPageSize"
-        :total="definitions.length"
+        :total="filteredDefinitions.length"
       />
       <PaginationBar
         v-else
@@ -535,6 +566,7 @@ watch(activeTab, (tab) => {
       <el-table-column label="操作" fixed="right" width="200" align="center"><template #default="scope"><div class="icon-action-group"><el-button class="icon-action-button" link type="success" :icon="VideoPlay" aria-label="执行" @click="openExecute(scope.row)"><span class="icon-action-label">执行</span></el-button><el-button class="icon-action-button" link type="primary" :icon="Edit" aria-label="编辑" @click="openEdit(scope.row)"><span class="icon-action-label">编辑</span></el-button><el-button class="icon-action-button" link type="danger" :icon="Delete" aria-label="删除" @click="remove(scope.row)"><span class="icon-action-label">删除</span></el-button></div></template></el-table-column>
     </el-table>
     <div v-if="projectId && !definitions.length" class="empty-state">当前项目还没有 API。</div>
+    <div v-else-if="projectId && !filteredDefinitions.length" class="empty-state">未找到匹配的 API。</div>
     <div v-if="!projectId" class="empty-state">请先创建一个项目。</div>
   </el-card>
 
@@ -582,7 +614,7 @@ watch(activeTab, (tab) => {
               <el-option v-for="method in ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD']" :key="method" :label="method" :value="method" />
             </el-select>
           </el-form-item>
-          <el-form-item label="请求地址" class="request-address-item">
+          <el-form-item label="请求路径" class="request-address-item">
             <el-input :model-value="requestAddress" :placeholder="requestAddressPlaceholder" @update:model-value="updateRequestEndpoint" />
             <div class="request-address-hint"><span>最终地址</span><code>{{ requestEndpoint }}</code></div>
           </el-form-item>

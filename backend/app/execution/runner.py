@@ -25,6 +25,8 @@ def build_request_config(
     config = render(config, parameter_context)
     config = _apply_parameter_values(config, parameters, parameter_context, overwrite=True)
     config = deep_merge(config, request_override or {})
+    if not config.get("url") and not config.get("base_url") and config.get("path"):
+        config["base_url"] = "{{ base_url }}"
     rendered = render(config, parameter_context)
     rendered = _apply_parameter_values(rendered, parameters, parameter_context, overwrite=False)
     path_params = rendered.get("path_params", {})

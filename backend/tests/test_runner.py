@@ -3,14 +3,26 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.database import Base
-from app.execution.protocols import ExecutionResult
 from app.execution.plans import execute_plan
+from app.execution.protocols import ExecutionResult, _resolve_url
 from app.execution.runner import build_request_config, execute_flow
-from app.models import ApiDefinition, ApiTemplate, Project
-from app.models import TestFlow as FlowModel
-from app.models import TestPlan as PlanModel
-from app.models import TestPlanRun as PlanRunModel
-from app.models import TestRun as RunModel
+from app.models import (
+    ApiDefinition,
+    ApiTemplate,
+    Project,
+)
+from app.models import (
+    TestFlow as FlowModel,
+)
+from app.models import (
+    TestPlan as PlanModel,
+)
+from app.models import (
+    TestPlanRun as PlanRunModel,
+)
+from app.models import (
+    TestRun as RunModel,
+)
 
 
 def test_parameter_defaults_build_request_values_and_inputs_override() -> None:
@@ -48,6 +60,34 @@ def test_parameter_defaults_build_request_values_and_inputs_override() -> None:
     assert overridden["path_params"] == {"user_id": 7}
     assert overridden["query"] == {"page": 3}
     assert overridden["path"] == "/users/7"
+
+
+def test_path_only_api_uses_project_base_url() -> None:
+    http_api = ApiDefinition(
+        project_id="project",
+        key="health",
+        name="health",
+        protocol="http",
+        request={"method": "GET", "path": "/health"},
+        parameters=[],
+    )
+    http_request = build_request_config(http_api, {"base_url": "127.0.0.1:8080"})
+
+    assert http_request["base_url"] == "127.0.0.1:8080"
+    assert _resolve_url(http_request) == "http://127.0.0.1:8080/health"
+
+    ws_api = ApiDefinition(
+        project_id="project",
+        key="events",
+        name="events",
+        protocol="ws",
+        request={"path": "/events"},
+        parameters=[],
+    )
+    ws_request = build_request_config(ws_api, {"base_url": "127.0.0.1:9000"})
+
+    assert ws_request["base_url"] == "127.0.0.1:9000"
+    assert _resolve_url(ws_request, scheme="ws") == "ws://127.0.0.1:9000/events"
 
 
 @pytest.mark.asyncio
