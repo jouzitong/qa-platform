@@ -37,6 +37,24 @@ FastAPI API layer
 SQLite (SQLAlchemy)
 ```
 
+## Codex 扫描集成
+
+面向任意被测项目的 HTTP/WebSocket 静态扫描器已迁入本仓库，源码位于 [`integrations/codex/qa-platform-skill`](integrations/codex/qa-platform-skill)。它生成待审核的 `qa-platform-import` ZIP；平台只会在预览后由人工确认导入，不会因扫描或一键入口直接修改项目资产。
+
+从本仓库安装或更新用户级 Codex Skill：
+
+```bash
+./scripts/install-codex-skill.sh
+```
+
+已安装旧版时，使用 `--force`；旧目录会先保存为带时间戳的备份：
+
+```bash
+./scripts/install-codex-skill.sh --force
+```
+
+默认安装目录为 `${CODEX_HOME:-$HOME/.codex}/skills/qa-platform-skill`。维护扫描器或导入格式时，运行 `make test-skill` 与 `make test-skill-contract`，后者覆盖“扫描 → 校验 → ZIP → 平台预览 → 人工确认导入”的真实契约。详见 [Codex Skill 集成说明](docs/integrations/codex-skill.md)。
+
 ## 本地启动
 
 需要 Python 3.11+ 和 Node.js 20+。
