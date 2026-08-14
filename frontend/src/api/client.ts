@@ -3,7 +3,6 @@ import type {
   ApiTemplate,
   ImportSession,
   AssertionDefinition,
-  AssertionProfile,
   Project,
   TestFlow,
   TestPlan,
@@ -105,22 +104,6 @@ export const api = {
       }),
     remove: (id: string) =>
       request<void>(`/assertion-definitions/${id}`, { method: 'DELETE' }),
-  },
-  assertionProfiles: {
-    list: (projectId?: string) =>
-      request<AssertionProfile[]>(
-        `/assertion-profiles${projectId ? `?project_id=${projectId}` : ''}`,
-      ),
-    create: (payload: Partial<AssertionProfile>) =>
-      request<AssertionProfile>('/assertion-profiles', {
-        method: 'POST', body: JSON.stringify(payload),
-      }),
-    update: (id: string, payload: Partial<AssertionProfile>) =>
-      request<AssertionProfile>(`/assertion-profiles/${id}`, {
-        method: 'PATCH', body: JSON.stringify(payload),
-      }),
-    remove: (id: string) =>
-      request<void>(`/assertion-profiles/${id}`, { method: 'DELETE' }),
   },
   templates: {
     list: (projectId?: string) =>

@@ -34,9 +34,6 @@ class Project(TimestampMixin, Base):
     assertion_definitions: Mapped[list["AssertionDefinition"]] = relationship(
         cascade="all, delete-orphan"
     )
-    assertion_profiles: Mapped[list["AssertionProfile"]] = relationship(
-        cascade="all, delete-orphan"
-    )
     flows: Mapped[list["TestFlow"]] = relationship(cascade="all, delete-orphan")
     test_plans: Mapped[list["TestPlan"]] = relationship(cascade="all, delete-orphan")
 
@@ -96,22 +93,24 @@ class ApiDefinition(TimestampMixin, Base):
     template_id: Mapped[str | None] = mapped_column(
         ForeignKey("api_templates.id", ondelete="RESTRICT"), nullable=True, index=True
     )
-    assertion_profile_id: Mapped[str | None] = mapped_column(
-        ForeignKey("assertion_profiles.id", ondelete="RESTRICT"), nullable=True, index=True
+    success_assertion_id: Mapped[str | None] = mapped_column(
+        ForeignKey("assertion_definitions.id", ondelete="RESTRICT"), nullable=True, index=True
     )
     key: Mapped[str] = mapped_column(String(120), index=True)
     name: Mapped[str] = mapped_column(String(120), index=True)
     protocol: Mapped[str] = mapped_column(String(10), default="http")
     description: Mapped[str] = mapped_column(Text, default="")
     request: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    request_schema: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    response_schema: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     parameters: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     examples: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     success_contract: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     response_variants: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
 
     template: Mapped[ApiTemplate | None] = relationship(back_populates="apis")
-    assertion_profile: Mapped["AssertionProfile | None"] = relationship(
-        back_populates="apis"
+    success_assertion: Mapped["AssertionDefinition | None"] = relationship(
+        foreign_keys=[success_assertion_id]
     )
 
 
@@ -134,29 +133,6 @@ class AssertionDefinition(TimestampMixin, Base):
     default_params: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     severity: Mapped[str] = mapped_column(String(10), default="success")
     message: Mapped[str] = mapped_column(Text, default="")
-
-
-class AssertionProfile(TimestampMixin, Base):
-    __tablename__ = "assertion_profiles"
-    __table_args__ = (
-        UniqueConstraint("project_id", "name", name="uq_assertion_profile_project_name"),
-    )
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    project_id: Mapped[str] = mapped_column(
-        ForeignKey("projects.id", ondelete="CASCADE"), index=True
-    )
-    name: Mapped[str] = mapped_column(String(120), index=True)
-    protocol: Mapped[str] = mapped_column(String(10), default="http")
-    description: Mapped[str] = mapped_column(Text, default="")
-    is_default: Mapped[bool] = mapped_column(default=False, index=True)
-    bindings: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
-
-    apis: Mapped[list[ApiDefinition]] = relationship(back_populates="assertion_profile")
-
-    @property
-    def usage_count(self) -> int:
-        return len(self.apis)
 
 
 class TestFlow(TimestampMixin, Base):

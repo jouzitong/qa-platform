@@ -49,11 +49,13 @@ class ApiCreate(BaseModel):
     project_id: str
     key: str = Field(min_length=1, max_length=120)
     template_id: str | None = None
-    assertion_profile_id: str | None = None
+    success_assertion_id: str | None = None
     name: str = Field(min_length=1, max_length=120)
     protocol: Literal["http", "ws"] = "http"
     description: str = ""
     request: dict[str, Any] = Field(default_factory=dict)
+    request_schema: dict[str, Any] = Field(default_factory=dict)
+    response_schema: dict[str, Any] = Field(default_factory=dict)
     parameters: list[dict[str, Any]] = Field(default_factory=list)
     examples: list[dict[str, Any]] = Field(default_factory=list)
     success_contract: dict[str, Any] = Field(default_factory=default_success_contract)
@@ -63,11 +65,13 @@ class ApiCreate(BaseModel):
 class ApiUpdate(BaseModel):
     key: str | None = Field(default=None, min_length=1, max_length=120)
     template_id: str | None = None
-    assertion_profile_id: str | None = None
+    success_assertion_id: str | None = None
     name: str | None = Field(default=None, min_length=1, max_length=120)
     protocol: Literal["http", "ws"] | None = None
     description: str | None = None
     request: dict[str, Any] | None = None
+    request_schema: dict[str, Any] | None = None
+    response_schema: dict[str, Any] | None = None
     parameters: list[dict[str, Any]] | None = None
     examples: list[dict[str, Any]] | None = None
     success_contract: dict[str, Any] | None = None
@@ -131,30 +135,6 @@ class AssertionDefinitionUpdate(BaseModel):
 
 class AssertionDefinitionRead(AssertionDefinitionCreate, ORMModel):
     id: str
-    created_at: datetime
-    updated_at: datetime
-
-
-class AssertionProfileCreate(BaseModel):
-    project_id: str
-    name: str = Field(min_length=1, max_length=120)
-    protocol: Literal["http", "ws"] = "http"
-    description: str = ""
-    is_default: bool = False
-    bindings: list[dict[str, Any]] = Field(default_factory=list)
-
-
-class AssertionProfileUpdate(BaseModel):
-    name: str | None = Field(default=None, min_length=1, max_length=120)
-    protocol: Literal["http", "ws"] | None = None
-    description: str | None = None
-    is_default: bool | None = None
-    bindings: list[dict[str, Any]] | None = None
-
-
-class AssertionProfileRead(AssertionProfileCreate, ORMModel):
-    id: str
-    usage_count: int
     created_at: datetime
     updated_at: datetime
 

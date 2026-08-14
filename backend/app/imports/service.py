@@ -13,7 +13,6 @@ from app.models import (
     ApiDefinition,
     ApiTemplate,
     AssertionDefinition,
-    AssertionProfile,
     ImportSession,
     Project,
     TestFlow,
@@ -45,12 +44,6 @@ COLLECTIONS: tuple[tuple[str, type[Any], str, tuple[str, ...]], ...] = (
         ),
     ),
     (
-        "assertion_profiles",
-        AssertionProfile,
-        "name",
-        ("name", "protocol", "description", "is_default", "bindings"),
-    ),
-    (
         "apis",
         ApiDefinition,
         "key",
@@ -60,12 +53,14 @@ COLLECTIONS: tuple[tuple[str, type[Any], str, tuple[str, ...]], ...] = (
             "protocol",
             "description",
             "request",
+            "request_schema",
+            "response_schema",
             "parameters",
             "examples",
             "success_contract",
             "response_variants",
             "template_id",
-            "assertion_profile_id",
+            "success_assertion_id",
         ),
     ),
     (
@@ -98,16 +93,12 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "severity": "success",
         "message": "",
     },
-    "assertion_profiles": {
-        "protocol": "http",
-        "description": "",
-        "is_default": False,
-        "bindings": [],
-    },
     "apis": {
         "protocol": "http",
         "description": "",
         "request": {},
+        "request_schema": {},
+        "response_schema": {},
         "parameters": [],
         "examples": [],
         "success_contract": {},
@@ -244,34 +235,6 @@ def _materialize_assertion_ref(
         errors.append(f"引用了不存在的断言：{value}")
         return None
     return target_id
-
-
-def _materialize_bindings(
-    session: Session,
-    project_id: str | None,
-    bindings: list[dict[str, Any]],
-    package: dict[str, Any],
-    existing_maps: dict[str, dict[str, Any]],
-    errors: list[str],
-) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = []
-    for binding in bindings:
-        item = deepcopy(binding)
-        if not isinstance(item, dict):
-            errors.append("断言集合 bindings 中的每一项必须是对象")
-            continue
-        assertion_id = _materialize_assertion_ref(
-            session,
-            project_id,
-            item.get("assertion_id"),
-            package["assertion_definitions"],
-            existing_maps["assertion_definitions"],
-            errors,
-        )
-        if assertion_id:
-            item["assertion_id"] = assertion_id
-            result.append(item)
-    return result
 
 
 def _materialize_step_assertions(
@@ -439,7 +402,7 @@ def _incoming_payload(
     payload = {
         field: _value(record, collection, field)
         for field in fields
-        if field not in {"template_id", "assertion_profile_id", "steps", "items"}
+        if field not in {"template_id", "success_assertion_id", "steps", "items"}
     }
     if collection == "apis":
         template_value = next(
@@ -450,13 +413,13 @@ def _incoming_payload(
             ),
             None,
         )
-        profile_value = next(
+        assertion_value = next(
             (
                 record.get(field)
                 for field in (
-                    "assertion_profile_key",
-                    "assertion_profile_name",
-                    "assertion_profile_id",
+                    "success_assertion_key",
+                    "success_assertion_name",
+                    "success_assertion_id",
                 )
                 if record.get(field) not in (None, "")
             ),
@@ -470,13 +433,13 @@ def _incoming_payload(
             "template_name",
             "template_id",
         )
-        profile_identity = _reference_identity(
+        assertion_identity = _reference_identity(
             record,
-            package["assertion_profiles"],
-            "name",
-            "assertion_profile_key",
-            "assertion_profile_name",
-            "assertion_profile_id",
+            package["assertion_definitions"],
+            "key",
+            "success_assertion_key",
+            "success_assertion_name",
+            "success_assertion_id",
         )
         if template_identity is None and project_id and template_value:
             direct_template = session.scalar(
@@ -486,14 +449,14 @@ def _incoming_payload(
                 )
             )
             template_identity = direct_template.name if direct_template else None
-        if profile_identity is None and project_id and profile_value:
-            direct_profile = session.scalar(
-                select(AssertionProfile).where(
-                    AssertionProfile.id == str(profile_value),
-                    AssertionProfile.project_id == project_id,
+        if assertion_identity is None and project_id and assertion_value:
+            direct_assertion = session.scalar(
+                select(AssertionDefinition).where(
+                    AssertionDefinition.id == str(assertion_value),
+                    AssertionDefinition.project_id == project_id,
                 )
             )
-            profile_identity = direct_profile.name if direct_profile else None
+            assertion_identity = direct_assertion.key if direct_assertion else None
         if (
             any(
                 record.get(field) not in (None, "")
@@ -506,14 +469,14 @@ def _incoming_payload(
             any(
                 record.get(field) not in (None, "")
                 for field in (
-                    "assertion_profile_key",
-                    "assertion_profile_name",
-                    "assertion_profile_id",
+                    "success_assertion_key",
+                    "success_assertion_name",
+                    "success_assertion_id",
                 )
             )
-            and profile_identity is None
+            and assertion_identity is None
         ):
-            errors.append(f"API {record.get('key')} 引用了不存在的断言集合")
+            errors.append(f"API {record.get('key')} 引用了不存在的成功条件")
         payload["template_id"] = _target_ref(
             session,
             project_id,
@@ -521,16 +484,22 @@ def _incoming_payload(
             existing_maps["api_templates"],
             ApiTemplate,
         )
-        payload["assertion_profile_id"] = _target_ref(
+        payload["success_assertion_id"] = _target_ref(
             session,
             project_id,
-            profile_identity,
-            existing_maps["assertion_profiles"],
-            AssertionProfile,
+            assertion_identity,
+            existing_maps["assertion_definitions"],
+            AssertionDefinition,
         )
         if payload.get("protocol") == "http":
             request = deep_merge({}, payload.get("request") or {})
             headers = dict(request.get("headers") or {})
+            request_schema = payload.get("request_schema") or {}
+            accept = request_schema.get("accept") if isinstance(request_schema, dict) else None
+            if isinstance(accept, str) and accept.strip() and "accept" not in {
+                str(key).lower() for key in headers
+            }:
+                headers["Accept"] = accept.strip()
             for name, value in DEFAULT_HTTP_HEADERS.items():
                 if name.lower() not in {str(key).lower() for key in headers}:
                     headers[name] = value
@@ -541,39 +510,11 @@ def _incoming_payload(
                 str(payload.get("protocol") or "http")
             )
         variants = []
-        profile_records = package["assertion_profiles"]
-        profile_lookup = _source_lookup(profile_records, "name")
         for variant in list(payload.get("response_variants") or []):
             materialized_variant = deepcopy(variant)
-            profile_ids = []
-            for value in list(materialized_variant.get("assertion_profile_ids") or []):
-                identity = profile_lookup.get(str(value)) or str(value)
-                target_id = _target_ref(
-                    session,
-                    project_id,
-                    identity,
-                    existing_maps["assertion_profiles"],
-                    AssertionProfile,
-                )
-                if target_id is None or (
-                    target_id.startswith("new:") and identity not in profile_lookup.values()
-                ):
-                    errors.append(f"响应变体引用了不存在的断言集合：{value}")
-                    continue
-                profile_ids.append(target_id)
-            if "assertion_profile_ids" in materialized_variant:
-                materialized_variant["assertion_profile_ids"] = profile_ids
+            materialized_variant.pop("assertion_profile_ids", None)
             variants.append(materialized_variant)
         payload["response_variants"] = variants
-    elif collection == "assertion_profiles":
-        payload["bindings"] = _materialize_bindings(
-            session,
-            project_id,
-            list(record.get("bindings") or []),
-            package,
-            existing_maps,
-            errors,
-        )
     elif collection == "flows":
         payload["steps"] = _materialize_steps(
             session,
@@ -743,10 +684,6 @@ def _apply_collection(
             source_id = record.get("id")
             if source_id:
                 existing_maps["_source_template_ids"][str(source_id)] = existing.id
-        if collection == "assertion_profiles":
-            source_id = record.get("id")
-            if source_id:
-                existing_maps["_source_profile_ids"][str(source_id)] = existing.id
         if collection == "apis":
             source_id = record.get("id")
             if source_id:
@@ -782,23 +719,11 @@ def apply_import(session: Session, import_session: ImportSession) -> Project:
         for collection, model, identity_field, _fields in COLLECTIONS
     }
     existing_maps["_source_template_ids"] = {}
-    existing_maps["_source_profile_ids"] = {}
     existing_maps["_source_api_ids"] = {}
     existing_maps["_source_flow_ids"] = {}
 
     # Dependencies are applied first so API, flow, and plan references can be resolved.
-    for collection, model, identity_field, fields in COLLECTIONS[:4]:
-        _apply_collection(
-            session,
-            collection,
-            model,
-            identity_field,
-            fields,
-            package,
-            target_project.id,
-            existing_maps,
-        )
-    for collection, model, identity_field, fields in COLLECTIONS[4:]:
+    for collection, model, identity_field, fields in COLLECTIONS:
         _apply_collection(
             session,
             collection,

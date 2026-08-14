@@ -1,0 +1,54 @@
+{
+  "schema_version": "http-api/v1",
+  "key": "http:POST:/api/v1/auths/signin",
+  "protocol": "http",
+  "method": "POST",
+  "path": "/api/v1/auths/signin",
+  "name": "用户登录",
+  "template_key": "athena-auth",
+  "description": "OpenWebUI 兼容认证登录接口。",
+  "request": {
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "username": "{{ username }}",
+      "password": "{{ password }}"
+    },
+    "timeout_seconds": 20
+  },
+  "parameters": [
+    {
+      "name": "username",
+      "in": "body",
+      "type": "string",
+      "required": true,
+      "description": "登录用户名或邮箱",
+      "example": "user@example.com"
+    },
+    {
+      "name": "password",
+      "in": "body",
+      "type": "string",
+      "required": true,
+      "description": "登录密码",
+      "example": "{{ password }}"
+    }
+  ],
+  "request_schema": {
+    "accept": "application/json",
+    "schema": {
+      "type": "object",
+      "required": ["username", "password"],
+      "properties": {
+        "username": { "type": "string" },
+        "password": { "type": "string", "writeOnly": true }
+      }
+    }
+  },
+  "success_assertion_key": "system:success-status",
+  "source_refs": [],
+  "discovery_method": "source",
+  "confidence": 0.85,
+  "warnings": []
+}

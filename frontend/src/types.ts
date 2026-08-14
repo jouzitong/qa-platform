@@ -45,11 +45,13 @@ export interface ApiDefinition {
   project_id: string
   key: string
   template_id: string | null
-  assertion_profile_id: string | null
+  success_assertion_id: string | null
   name: string
   protocol: 'http' | 'ws'
   description: string
   request: Record<string, unknown>
+  request_schema: Record<string, unknown>
+  response_schema: Record<string, unknown>
   parameters: Record<string, unknown>[]
   examples: Record<string, unknown>[]
   success_contract: Record<string, unknown>
@@ -69,19 +71,6 @@ export interface AssertionDefinition {
   default_params: Record<string, unknown>
   severity: 'success' | 'error' | 'warning'
   message: string
-  created_at: string
-  updated_at: string
-}
-
-export interface AssertionProfile {
-  id: string
-  project_id: string
-  name: string
-  protocol: 'http' | 'ws'
-  description: string
-  is_default: boolean
-  bindings: Record<string, unknown>[]
-  usage_count: number
   created_at: string
   updated_at: string
 }

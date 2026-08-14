@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.execution.assertions import evaluate_assertion_rules
 from app.execution.expression import evaluate_expression
-from app.models import ApiDefinition, AssertionDefinition, AssertionProfile
+from app.models import ApiDefinition, AssertionDefinition
 
 
 def definition_to_rule(
@@ -24,28 +24,16 @@ def definition_to_rule(
     }
 
 
-def resolve_profile_rules(
+def resolve_success_assertion_rule(
     session: Session,
-    profile_ids: list[str],
+    assertion_id: str,
     *,
     project_id: str,
-    protocol: str,
-) -> list[dict[str, Any]]:
-    rules: list[dict[str, Any]] = []
-    for profile_id in profile_ids:
-        profile = session.get(AssertionProfile, profile_id)
-        if not profile or profile.project_id != project_id or profile.protocol != protocol:
-            raise ValueError(f"Invalid assertion profile for this API: {profile_id}")
-        for binding in profile.bindings:
-            if not binding.get("enabled", True):
-                continue
-            definition = session.get(AssertionDefinition, binding.get("assertion_id"))
-            if not definition or definition.project_id != project_id:
-                raise ValueError(
-                    f"Assertion definition not found in this project: {binding.get('assertion_id')}"
-                )
-            rules.append(definition_to_rule(definition, binding))
-    return rules
+) -> dict[str, Any]:
+    definition = session.get(AssertionDefinition, assertion_id)
+    if not definition or definition.project_id != project_id:
+        raise ValueError(f"成功条件不存在或不属于当前项目：{assertion_id}")
+    return definition_to_rule(definition)
 
 
 def validate_api_response(
@@ -58,18 +46,20 @@ def validate_api_response(
     step_assertions: list[dict[str, Any]] | None = None,
     step_disabled_assertion_ids: list[str] | None = None,
 ) -> dict[str, Any]:
-    profile_ids: list[str] = []
-    if api.assertion_profile_id:
-        profile_ids.append(api.assertion_profile_id)
     variant: dict[str, Any] | None = None
     rules: list[dict[str, Any]] = []
 
-    # An API-level assertion profile is the single source of truth for success.
-    # Keep success_contract only as a compatibility fallback for older APIs that
-    # have not yet been linked to a success assertion profile.
-    if not api.assertion_profile_id and api.success_contract:
+    # A directly linked success condition is the source of truth.
+    # Keep success_contract only as a compatibility fallback for older APIs.
+    if api.success_assertion_id:
+        rules.append(
+            resolve_success_assertion_rule(
+                session, api.success_assertion_id, project_id=api.project_id
+            )
+        )
+    elif api.success_contract:
         rules.extend(_success_contract_rules(api.protocol, api.success_contract))
-    elif not api.assertion_profile_id:
+    else:
         # Legacy response variants remain readable for existing projects.
         variant, match_error = _select_variant(api.response_variants, request, response, context)
         if api.response_variants and not variant:
@@ -83,8 +73,6 @@ def validate_api_response(
                 "actual": None,
             }
             return {"passed": False, "variant": None, "results": [result]}
-        if variant:
-            profile_ids.extend(str(item) for item in variant.get("assertion_profile_ids", []))
         if not api.response_variants and api.protocol == "http":
             rules.append(
                 {
@@ -110,9 +98,6 @@ def validate_api_response(
         if variant:
             rules.extend(variant.get("assertions", []))
 
-    rules = resolve_profile_rules(
-        session, profile_ids, project_id=api.project_id, protocol=api.protocol
-    ) + rules
     rules.extend(step_assertions or [])
 
     disabled = set(variant.get("disabled_assertion_ids", []) if variant else [])
@@ -144,8 +129,8 @@ def validate_api_response(
         context=context,
     )
     validation["variant"] = variant.get("name") if variant else None
-    validation["success_contract"] = bool(api.success_contract and not api.assertion_profile_id)
-    validation["success_profile_id"] = api.assertion_profile_id
+    validation["success_contract"] = bool(api.success_contract and not api.success_assertion_id)
+    validation["success_assertion_id"] = api.success_assertion_id
     return validation
 
 

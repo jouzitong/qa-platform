@@ -12,7 +12,7 @@ from app.execution.context import deep_merge
 from app.execution.expression import ExpressionError, parse_expression
 from app.execution.runner import execute_api_once
 from app.execution.validation import validate_api_response
-from app.models import ApiDefinition, ApiTemplate, AssertionProfile, Project, TestFlow
+from app.models import ApiDefinition, ApiTemplate, AssertionDefinition, Project, TestFlow
 from app.schemas import ApiCreate, ApiRead, ApiUpdate, ExecuteRequest
 from app.success_contract import default_success_contract
 
@@ -24,16 +24,51 @@ DEFAULT_HTTP_HEADERS = {
 }
 
 
-def _with_default_http_headers(request: dict[str, Any]) -> dict[str, Any]:
+def _with_default_http_headers(
+    request: dict[str, Any], request_schema: dict[str, Any] | None = None
+) -> dict[str, Any]:
     result = deep_merge({}, request)
     headers = result.get("headers")
     normalized_headers = dict(headers) if isinstance(headers, dict) else {}
     existing_names = {str(name).lower() for name in normalized_headers}
+    accept = request_schema.get("accept") if isinstance(request_schema, dict) else None
+    if accept is not None and not isinstance(accept, str):
+        raise HTTPException(status_code=422, detail="request_schema.accept must be a string")
+    if isinstance(accept, str) and accept.strip() and "accept" not in existing_names:
+        normalized_headers["Accept"] = accept.strip()
+        existing_names.add("accept")
     for name, value in DEFAULT_HTTP_HEADERS.items():
         if name.lower() not in existing_names:
             normalized_headers[name] = value
     result["headers"] = normalized_headers
     return result
+
+
+def _validate_request_schema(protocol: str, request_schema: dict[str, Any]) -> None:
+    if not isinstance(request_schema, dict):
+        raise HTTPException(status_code=422, detail="request_schema must be an object")
+    accept = request_schema.get("accept")
+    if accept is not None and not isinstance(accept, str):
+        raise HTTPException(status_code=422, detail="request_schema.accept must be a string")
+    if protocol == "ws" and accept not in (None, ""):
+        raise HTTPException(status_code=422, detail="WebSocket request_schema cannot define accept")
+    schema = request_schema.get("schema")
+    if schema is not None:
+        try:
+            Draft202012Validator.check_schema(schema)
+        except SchemaError as exc:
+            raise HTTPException(status_code=422, detail=f"Request schema: {exc}") from None
+
+
+def _validate_response_schema(response_schema: dict[str, Any]) -> None:
+    if not isinstance(response_schema, dict):
+        raise HTTPException(status_code=422, detail="response_schema must be an object")
+    if not response_schema:
+        return
+    try:
+        Draft202012Validator.check_schema(response_schema)
+    except SchemaError as exc:
+        raise HTTPException(status_code=422, detail=f"Response schema: {exc}") from None
 
 
 def _validate_template(
@@ -52,28 +87,20 @@ def _validate_template(
     return template
 
 
-def _validate_profile(
+def _validate_success_assertion(
     session: Session,
     project_id: str,
-    protocol: str,
-    profile_id: str | None,
-) -> AssertionProfile | None:
-    if not profile_id:
+    assertion_id: str | None,
+) -> AssertionDefinition | None:
+    if not assertion_id:
         return None
-    profile = get_or_404(session, AssertionProfile, profile_id, "Assertion profile")
-    if profile.project_id != project_id:
-        raise HTTPException(status_code=422, detail="Assertion profile belongs to another project")
-    if profile.protocol != protocol:
-        raise HTTPException(
-            status_code=422, detail="API and assertion profile protocols must match"
-        )
-    return profile
+    assertion = get_or_404(session, AssertionDefinition, assertion_id, "成功条件")
+    if assertion.project_id != project_id:
+        raise HTTPException(status_code=422, detail="成功条件属于其他项目")
+    return assertion
 
 
 def _validate_variants(
-    session: Session,
-    project_id: str,
-    protocol: str,
     variants: list[dict[str, Any]],
 ) -> None:
     names: set[str] = set()
@@ -88,10 +115,6 @@ def _validate_variants(
                 Draft202012Validator.check_schema(variant["schema"])
         except (ExpressionError, SchemaError) as exc:
             raise HTTPException(status_code=422, detail=f"Variant {name}: {exc}") from None
-        for profile_id in variant.get("assertion_profile_ids", []):
-            _validate_profile(session, project_id, protocol, str(profile_id))
-
-
 def _validate_success_contract(protocol: str, contract: dict[str, Any]) -> None:
     if not isinstance(contract, dict):
         raise HTTPException(status_code=422, detail="Success contract must be an object")
@@ -116,16 +139,6 @@ def _validate_success_contract(protocol: str, contract: dict[str, Any]) -> None:
             raise HTTPException(status_code=422, detail=f"Success response schema: {exc}") from None
 
 
-def _default_profile(session: Session, project_id: str, protocol: str) -> AssertionProfile | None:
-    return session.scalar(
-        select(AssertionProfile).where(
-            AssertionProfile.project_id == project_id,
-            AssertionProfile.protocol == protocol,
-            AssertionProfile.is_default.is_(True),
-        )
-    )
-
-
 @router.get("", response_model=list[ApiRead])
 def list_apis(
     project_id: str | None = Query(default=None), session: Session = Depends(get_session)
@@ -140,25 +153,30 @@ def list_apis(
 def create_api(payload: ApiCreate, session: Session = Depends(get_session)) -> ApiDefinition:
     get_or_404(session, Project, payload.project_id, "Project")
     _validate_template(session, payload.project_id, payload.protocol, payload.template_id)
-    profile_id = payload.assertion_profile_id
-    if "assertion_profile_id" not in payload.model_fields_set:
-        profile_id = (_default_profile(session, payload.project_id, payload.protocol) or None)
-        profile_id = profile_id.id if profile_id else None
-    _validate_profile(session, payload.project_id, payload.protocol, profile_id)
+    _validate_success_assertion(
+        session, payload.project_id, payload.success_assertion_id
+    )
+    _validate_request_schema(payload.protocol, payload.request_schema)
+    _validate_response_schema(payload.response_schema)
     _validate_variants(
-        session, payload.project_id, payload.protocol, payload.response_variants
+        payload.response_variants
     )
     success_contract = payload.success_contract
     if payload.protocol == "ws" and "messages" not in success_contract:
         success_contract = default_success_contract("ws")
+    response_schema = payload.response_schema or success_contract.get("body_schema", {})
+    _validate_response_schema(response_schema)
+    if response_schema:
+        success_contract = {**success_contract, "body_schema": response_schema}
     _validate_success_contract(payload.protocol, success_contract)
-    values = payload.model_dump(exclude={"assertion_profile_id"})
+    values = payload.model_dump(exclude={"success_assertion_id"})
     if payload.protocol == "http":
-        values["request"] = _with_default_http_headers(payload.request)
+        values["request"] = _with_default_http_headers(payload.request, payload.request_schema)
     values["success_contract"] = success_contract
+    values["response_schema"] = response_schema
     definition = ApiDefinition(
         **values,
-        assertion_profile_id=profile_id,
+        success_assertion_id=payload.success_assertion_id,
     )
     session.add(definition)
     commit_or_conflict(session, "API key already exists in this project")
@@ -179,17 +197,18 @@ def update_api(
     values = payload.model_dump(exclude_unset=True)
     target_protocol = values.get("protocol", definition.protocol)
     target_template_id = values.get("template_id", definition.template_id)
-    target_profile_id = values.get("assertion_profile_id", definition.assertion_profile_id)
+    target_assertion_id = values.get("success_assertion_id", definition.success_assertion_id)
     _validate_template(
         session, definition.project_id, target_protocol, target_template_id
     )
-    _validate_profile(
-        session, definition.project_id, target_protocol, target_profile_id
+    _validate_success_assertion(session, definition.project_id, target_assertion_id)
+    target_request_schema = values.get("request_schema", definition.request_schema)
+    _validate_request_schema(target_protocol, target_request_schema)
+    target_response_schema = values.get(
+        "response_schema", getattr(definition, "response_schema", {})
     )
+    _validate_response_schema(target_response_schema)
     _validate_variants(
-        session,
-        definition.project_id,
-        target_protocol,
         values.get("response_variants", definition.response_variants),
     )
     success_contract = values.get(
@@ -204,7 +223,15 @@ def update_api(
     elif target_protocol == "http" and "status_codes" not in success_contract:
         success_contract = default_success_contract("http")
         values["success_contract"] = success_contract
+    if target_response_schema:
+        success_contract = {**success_contract, "body_schema": target_response_schema}
+        values["success_contract"] = success_contract
+    values["response_schema"] = target_response_schema
     _validate_success_contract(target_protocol, success_contract)
+    if target_protocol == "http":
+        values["request"] = _with_default_http_headers(
+            values.get("request", definition.request), target_request_schema
+        )
     for field, value in values.items():
         setattr(definition, field, value)
     commit_or_conflict(session, "API key already exists in this project")

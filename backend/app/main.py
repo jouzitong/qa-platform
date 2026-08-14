@@ -4,7 +4,6 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.assertions import definitions_router as assertion_definitions_router
-from app.api.assertions import profiles_router as assertion_profiles_router
 from app.api.definitions import router as definitions_router
 from app.api.flows import router as flows_router
 from app.api.imports import router as imports_router
@@ -41,7 +40,6 @@ app.include_router(projects_router, prefix="/api/v1")
 app.include_router(templates_router, prefix="/api/v1")
 app.include_router(definitions_router, prefix="/api/v1")
 app.include_router(assertion_definitions_router, prefix="/api/v1")
-app.include_router(assertion_profiles_router, prefix="/api/v1")
 app.include_router(flows_router, prefix="/api/v1")
 app.include_router(imports_router, prefix="/api/v1")
 app.include_router(plans_router, prefix="/api/v1")

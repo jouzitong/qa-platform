@@ -51,6 +51,27 @@ function newStep(): EditableStep {
   }
 }
 
+function apiPath(definition: ApiDefinition): string {
+  const request = definition.request || {}
+  const rawTarget = String(request.path || request.url || '').trim()
+  if (!rawTarget) return ''
+  if (request.path) return rawTarget
+
+  const templateTarget = rawTarget.replace(/^(?:https?:\/\/)?\{\{\s*base_url\s*\}\}/, '')
+  if (templateTarget !== rawTarget) return templateTarget || '/'
+
+  try {
+    return new URL(rawTarget, 'http://qa-platform.local').pathname || '/'
+  } catch {
+    return rawTarget
+  }
+}
+
+function apiOptionLabel(definition: ApiDefinition): string {
+  const path = apiPath(definition)
+  return `${definition.protocol.toUpperCase()} · ${definition.name}${path ? ` · ${path}` : ''}`
+}
+
 function openCreate() {
   editingId.value = ''
   Object.assign(form, { key: '', name: '', description: '', variables: '{}', steps: [] })
@@ -159,7 +180,14 @@ watch(projectId, () => {
         <div class="step-head">
           <span class="step-number">{{ index + 1 }}</span>
           <el-input v-model="step.name" placeholder="步骤名称" style="width: 220px" />
-          <el-select v-model="step.api_id" placeholder="选择 API" style="flex: 1"><el-option v-for="definition in definitions" :key="definition.id" :label="`${definition.protocol.toUpperCase()} · ${definition.name}`" :value="definition.id" /></el-select>
+          <el-select v-model="step.api_id" class="step-api-select" placeholder="选择 API" style="flex: 1">
+            <el-option v-for="definition in definitions" :key="definition.id" :label="apiOptionLabel(definition)" :value="definition.id">
+              <div class="flow-api-option">
+                <span>{{ definition.protocol.toUpperCase() }} · {{ definition.name }}</span>
+                <code>{{ apiPath(definition) || '未设置路径' }}</code>
+              </div>
+            </el-option>
+          </el-select>
           <el-switch v-model="step.enabled" inline-prompt active-text="启" inactive-text="停" />
           <el-button text :disabled="index === 0" @click="move(index, -1)">上移</el-button>
           <el-button text :disabled="index === form.steps.length - 1" @click="move(index, 1)">下移</el-button>

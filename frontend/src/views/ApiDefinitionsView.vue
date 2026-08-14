@@ -5,17 +5,22 @@ import { computed, reactive, ref, watch } from 'vue'
 
 import { api } from '../api/client'
 import ApiParametersEditor from '../components/ApiParametersEditor.vue'
+import ApiRequestEditor from '../components/ApiRequestEditor.vue'
+import ApiResponseFieldsEditor from '../components/ApiResponseFieldsEditor.vue'
 import PaginationBar from '../components/PaginationBar.vue'
 import { useProjectContext } from '../state/project'
-import type { ApiDefinition, ApiTemplate, AssertionProfile } from '../types'
+import type { ApiDefinition, ApiTemplate, AssertionDefinition } from '../types'
 import { parseJson, pretty } from '../utils'
 
 const definitions = ref<ApiDefinition[]>([])
 const templates = ref<ApiTemplate[]>([])
-const profiles = ref<AssertionProfile[]>([])
+const assertions = ref<AssertionDefinition[]>([])
 const { projectId } = useProjectContext()
 const activeTab = ref<'apis' | 'templates'>('apis')
 const dialog = ref(false)
+const editorMode = ref<'visual' | 'json'>('visual')
+const advancedDraft = ref('{}')
+const advancedError = ref('')
 const templateDialog = ref(false)
 const executeDialog = ref(false)
 const apiPage = ref(1)
@@ -32,8 +37,8 @@ const executeValues = reactive<Record<string, unknown>>({})
 const pathParameterNames = ref<string[]>([])
 const form = reactive({
   key: '', name: '', protocol: 'http' as 'http' | 'ws', template_id: null as string | null,
-  assertion_profile_id: undefined as string | null | undefined,
-  description: '', request: '{}',
+  success_assertion_id: undefined as string | null | undefined,
+  description: '', request: '{}', request_schema: '{}', response_schema: '{}',
   parameters: '[]', examples: '[]', success_contract: '{}', response_variants: '[]',
 })
 const templateForm = reactive({
@@ -41,17 +46,25 @@ const templateForm = reactive({
   parameters: '[]', examples: '[]',
 })
 const executeForm = reactive({ inputs: '{}', request: '{}' })
+const commonAcceptOptions = [
+  { label: 'JSON', value: 'application/json' },
+  { label: 'Problem JSON', value: 'application/problem+json' },
+  { label: 'XML', value: 'application/xml' },
+  { label: '纯文本', value: 'text/plain' },
+  { label: 'HTML', value: 'text/html' },
+  { label: 'SSE 流', value: 'text/event-stream' },
+  { label: '二进制', value: 'application/octet-stream' },
+  { label: '任意类型', value: '*/*' },
+]
 const availableTemplates = computed(() =>
   templates.value.filter((template) => template.protocol === form.protocol),
-)
-const availableProfiles = computed(() =>
-  profiles.value.filter((profile) => profile.protocol === form.protocol),
 )
 const filteredDefinitions = computed(() => {
   const keyword = apiSearch.value.trim().toLocaleLowerCase()
   if (!keyword) return definitions.value
   return definitions.value.filter((definition) => (
     definition.name.toLocaleLowerCase().includes(keyword)
+    || definition.key.toLocaleLowerCase().includes(keyword)
     || requestTarget(definition).toLocaleLowerCase().includes(keyword)
   ))
 })
@@ -72,6 +85,58 @@ const requestConfig = computed<Record<string, unknown>>(() => {
   try { return JSON.parse(form.request) as Record<string, unknown> }
   catch { return {} }
 })
+const requestSchemaConfig = computed<Record<string, unknown>>(() => {
+  try { return JSON.parse(form.request_schema) as Record<string, unknown> }
+  catch { return {} }
+})
+const responseSchemaConfig = computed<Record<string, unknown>>({
+  get: () => {
+    try { return JSON.parse(form.response_schema) as Record<string, unknown> }
+    catch { return {} }
+  },
+  set: (value) => { form.response_schema = pretty(value) },
+})
+const requestSchemaAccept = computed({
+  get: () => {
+    const configured = requestSchemaConfig.value.accept
+    if (typeof configured === 'string') return configured
+    const headers = requestConfig.value.headers
+    if (!headers || typeof headers !== 'object' || Array.isArray(headers)) return ''
+    const entry = Object.entries(headers as Record<string, unknown>)
+      .find(([name]) => name.toLowerCase() === 'accept')
+    return typeof entry?.[1] === 'string' ? entry[1] : ''
+  },
+  set: (value: string) => {
+    const accept = value.trim()
+    const nextSchema = { ...requestSchemaConfig.value }
+    if (accept) nextSchema.accept = accept
+    else delete nextSchema.accept
+    form.request_schema = pretty(nextSchema)
+
+    const request = { ...requestConfig.value }
+    const headers = request.headers && typeof request.headers === 'object'
+      && !Array.isArray(request.headers)
+      ? { ...(request.headers as Record<string, unknown>) }
+      : {}
+    Object.keys(headers).forEach((name) => {
+      if (name.toLowerCase() === 'accept') delete headers[name]
+    })
+    if (accept) headers.Accept = accept
+    request.headers = headers
+    form.request = pretty(request)
+  },
+})
+const routeKey = computed(() => {
+  const request = requestConfig.value
+  if (form.protocol === 'http') {
+    const method = String(request.method || 'GET').toUpperCase()
+    const target = String(request.path || request.url || '').trim()
+    return target ? `http:${method}:${target}` : ''
+  }
+  const target = String(request.url || request.path || '').trim()
+  return target ? `ws:${target}` : ''
+})
+const displayKey = computed(() => routeKey.value || form.key)
 function protocolScheme(protocol: 'http' | 'ws') {
   return protocol === 'ws' ? 'ws' : 'http'
 }
@@ -116,29 +181,45 @@ const requestAddress = computed(() => {
   const url = String(request.url || '')
   if (inheritedRequestBase.value && url.startsWith(inheritedRequestBase.value))
     return url.slice(inheritedRequestBase.value.length) || '/'
-  return withProtocol(url, form.protocol)
+  return url
 })
-const requestAddressPlaceholder = computed(() => inheritedRequestBase.value
-  ? (form.protocol === 'http' ? '/users/{user_id}' : '/channels/{channel_id}')
-  : (form.protocol === 'http' ? '/users/{user_id}' : '/channels/{channel_id}'))
 const requestMethod = computed(() => form.protocol === 'ws'
   ? 'WS'
   : String(requestConfig.value.method || 'GET').toUpperCase())
-const requestEndpoint = computed(() => {
-  const request = requestConfig.value
+const requestTargetPreview = computed(() => {
+  const request = mergeConfig(findTemplate(form.template_id)?.request || {}, requestConfig.value)
   const directUrl = String(request.url || '').trim()
+  const path = String(request.path || '').trim()
+  if (!directUrl && !path && !request.base_url) return '尚未填写请求目标'
   if (directUrl && !directUrl.startsWith('/')) return withProtocol(directUrl, form.protocol)
-  const template = findTemplate(form.template_id)
-  const base = request.base_url || template?.request.base_url || template?.request.url
-  return composeRequestEndpoint(base, request.path || directUrl, form.protocol)
+  return composeRequestEndpoint(request.base_url, path || directUrl, form.protocol)
 })
 
+function updateRequestConfig(patch: Record<string, unknown>) {
+  form.request = pretty({ ...requestConfig.value, ...patch })
+}
+
+function updateRequestTarget(value: string) {
+  const current = requestConfig.value
+  const normalized = value.trim()
+  const usePath = Boolean(inheritedRequestBase.value)
+    || Object.prototype.hasOwnProperty.call(current, 'path')
+    || (!current.url && !normalized.includes('://'))
+  if (usePath) {
+    const { url: _url, ...rest } = current
+    form.request = pretty({ ...rest, path: value })
+  } else {
+    const { path: _path, ...rest } = current
+    form.request = pretty({ ...rest, url: value })
+  }
+  syncPathParameters(parsePathParameterNames(value))
+}
 async function load() {
-  if (!projectId.value) { definitions.value = []; templates.value = []; return }
+  if (!projectId.value) { definitions.value = []; templates.value = []; assertions.value = []; return }
   try {
-    ;[definitions.value, templates.value, profiles.value] = await Promise.all([
+    ;[definitions.value, templates.value, assertions.value] = await Promise.all([
       api.definitions.list(projectId.value), api.templates.list(projectId.value),
-      api.assertionProfiles.list(projectId.value),
+      api.assertionDefinitions.list(projectId.value),
     ])
   }
   catch (error) { ElMessage.error((error as Error).message) }
@@ -150,6 +231,10 @@ function defaultRequest(protocol: 'http' | 'ws') {
     : { path: '/', headers: {}, messages: [{ type: 'ping' }], receive_count: 1 }
 }
 
+function defaultRequestSchema(protocol: 'http' | 'ws') {
+  return protocol === 'http' ? { accept: 'application/json', schema: {} } : {}
+}
+
 function defaultSuccessContract(protocol: 'http' | 'ws') {
   return protocol === 'ws'
     ? { messages: { min: 1 }, body_schema: {} }
@@ -159,6 +244,10 @@ function defaultSuccessContract(protocol: 'http' | 'ws') {
           type: 'object', required: ['code', 'data'], properties: { code: { const: 0 } },
         },
       }
+}
+
+function defaultResponseSchema(protocol: 'http' | 'ws') {
+  return protocol === 'http' ? defaultSuccessContract('http').body_schema : {}
 }
 
 function defaultTemplateRequest(protocol: 'http' | 'ws') {
@@ -295,6 +384,31 @@ function effectiveRequest(definition: ApiDefinition) {
   return mergeConfig(findTemplate(definition.template_id)?.request || {}, definition.request)
 }
 
+function requestSchemaFor(definition: ApiDefinition) {
+  const schema = definition.request_schema && typeof definition.request_schema === 'object'
+    ? { ...definition.request_schema }
+    : {}
+  if (definition.protocol === 'http' && !schema.accept) {
+    const headers = definition.request?.headers
+    if (headers && typeof headers === 'object' && !Array.isArray(headers)) {
+      const entry = Object.entries(headers as Record<string, unknown>)
+        .find(([name]) => name.toLowerCase() === 'accept')
+      if (typeof entry?.[1] === 'string' && entry[1].trim()) schema.accept = entry[1]
+    }
+  }
+  return schema
+}
+
+function responseSchemaFor(definition: ApiDefinition) {
+  if (definition.response_schema && typeof definition.response_schema === 'object'
+    && Object.keys(definition.response_schema).length)
+    return { ...definition.response_schema }
+  const schema = definition.success_contract?.body_schema
+  return schema && typeof schema === 'object' && !Array.isArray(schema)
+    ? { ...schema as Record<string, unknown> }
+    : {}
+}
+
 function requestTarget(definition: ApiDefinition) {
   const request = effectiveRequest(definition)
   const method = request.method || (definition.protocol === 'ws' ? 'WS' : '')
@@ -316,14 +430,18 @@ function effectiveParameterCount(definition: ApiDefinition) {
 function openCreate() {
   if (!projectId.value) { ElMessage.warning('请先选择项目'); return }
   editingId.value = ''
-  Object.assign(form, { key: '', name: '', protocol: 'http', template_id: null, assertion_profile_id: undefined, description: '', request: pretty(defaultRequest('http')), parameters: '[]', examples: '[]', success_contract: pretty(defaultSuccessContract('http')), response_variants: '[]' })
+  Object.assign(form, { key: '', name: '', protocol: 'http', template_id: null, success_assertion_id: undefined, description: '', request: pretty(defaultRequest('http')), request_schema: pretty(defaultRequestSchema('http')), response_schema: pretty(defaultResponseSchema('http')), parameters: '[]', examples: '[]', success_contract: pretty(defaultSuccessContract('http')), response_variants: '[]' })
+  editorMode.value = 'visual'
+  advancedError.value = ''
   syncPathParameters(parsePathParameterNames(requestAddress.value))
   dialog.value = true
 }
 
 function openEdit(row: ApiDefinition) {
   editingId.value = row.id
-  Object.assign(form, { key: row.key, name: row.name, protocol: row.protocol, template_id: row.template_id, assertion_profile_id: row.assertion_profile_id, description: row.description, request: pretty(row.request), parameters: pretty(row.parameters), examples: pretty(row.examples), success_contract: pretty(Object.keys(row.success_contract || {}).length ? row.success_contract : defaultSuccessContract(row.protocol)), response_variants: pretty(row.response_variants) })
+  Object.assign(form, { key: row.key, name: row.name, protocol: row.protocol, template_id: row.template_id, success_assertion_id: row.success_assertion_id, description: row.description, request: pretty(row.request), request_schema: pretty(requestSchemaFor(row)), response_schema: pretty(responseSchemaFor(row)), parameters: pretty(row.parameters), examples: pretty(row.examples), success_contract: pretty(Object.keys(row.success_contract || {}).length ? row.success_contract : defaultSuccessContract(row.protocol)), response_variants: pretty(row.response_variants) })
+  editorMode.value = 'visual'
+  advancedError.value = ''
   syncPathParameters(parsePathParameterNames(requestAddress.value))
   dialog.value = true
 }
@@ -331,7 +449,9 @@ function openEdit(row: ApiDefinition) {
 function switchProtocol(protocol: 'http' | 'ws') {
   form.protocol = protocol
   form.template_id = null
-  form.assertion_profile_id = undefined
+  form.success_assertion_id = undefined
+  form.request_schema = pretty(defaultRequestSchema(protocol))
+  form.response_schema = pretty(defaultResponseSchema(protocol))
   if (!editingId.value) {
     form.request = pretty(defaultRequest(protocol))
     form.success_contract = pretty(defaultSuccessContract(protocol))
@@ -348,28 +468,81 @@ function selectTemplate(templateId: string | null) {
     form.request = pretty(template.protocol === 'http'
       ? { method: 'GET', path: '/health', headers: defaultHttpHeaders() }
       : { path: '/', messages: [{ type: 'ping' }], receive_count: 1 })
+    form.request_schema = pretty(defaultRequestSchema(template.protocol))
+    form.response_schema = pretty(defaultResponseSchema(template.protocol))
   }
   syncPathParameters(parsePathParameterNames(requestAddress.value))
 }
 
-function updateRequestConfig(patch: Record<string, unknown>) {
-  form.request = pretty({ ...requestConfig.value, ...patch })
+function advancedConfig() {
+  const parse = (value: string) => {
+    try { return JSON.parse(value) }
+    catch { return {} }
+  }
+  return {
+    key: displayKey.value,
+    name: form.name,
+    protocol: form.protocol,
+    template_id: form.template_id,
+    success_assertion_id: form.success_assertion_id,
+    description: form.description,
+    request: parse(form.request),
+    request_schema: parse(form.request_schema),
+    parameters: parse(form.parameters),
+    response_schema: parse(form.response_schema),
+    success_contract: parse(form.success_contract),
+    response_variants: parse(form.response_variants),
+    examples: parse(form.examples),
+  }
 }
 
-function updateRequestEndpoint(value: string) {
-  const request = requestConfig.value
-  const templateRequest = findTemplate(form.template_id)?.request || {}
-  const usesPath = Boolean(
-    templateRequest.base_url || templateRequest.url || request.base_url || 'path' in request,
-  )
-  if (usesPath) {
-    const { url: _url, ...rest } = request
-    form.request = pretty({ ...rest, path: value })
-  } else {
-    const { path: _path, ...rest } = request
-    form.request = pretty({ ...rest, url: value })
+function syncAdvancedDraft() {
+  advancedDraft.value = pretty(advancedConfig())
+  advancedError.value = ''
+}
+
+function applyAdvancedDraft() {
+  try {
+    const value = JSON.parse(advancedDraft.value) as Record<string, unknown>
+    if (!value || typeof value !== 'object' || Array.isArray(value))
+      throw new Error('高级 JSON 必须是对象')
+    if (value.name !== undefined && typeof value.name !== 'string')
+      throw new Error('name 必须是字符串')
+    if (value.protocol !== undefined && value.protocol !== 'http' && value.protocol !== 'ws')
+      throw new Error('protocol 只能是 http 或 ws')
+    form.name = String(value.name || '')
+    form.protocol = (value.protocol || form.protocol) as 'http' | 'ws'
+    form.template_id = typeof value.template_id === 'string' ? value.template_id : null
+    form.success_assertion_id = typeof value.success_assertion_id === 'string'
+      ? value.success_assertion_id : value.success_assertion_id === null ? null : undefined
+    form.description = String(value.description || '')
+    form.request = pretty(value.request && typeof value.request === 'object' ? value.request : {})
+    form.request_schema = pretty(value.request_schema && typeof value.request_schema === 'object' ? value.request_schema : {})
+    form.parameters = pretty(Array.isArray(value.parameters) ? value.parameters : [])
+    form.response_schema = pretty(value.response_schema && typeof value.response_schema === 'object' ? value.response_schema : {})
+    form.success_contract = pretty(value.success_contract && typeof value.success_contract === 'object' ? value.success_contract : {})
+    form.response_variants = pretty(Array.isArray(value.response_variants) ? value.response_variants : [])
+    form.examples = pretty(Array.isArray(value.examples) ? value.examples : [])
+    syncPathParameters(parsePathParameterNames(requestAddress.value))
+    advancedError.value = ''
+    return true
+  } catch (error) {
+    advancedError.value = (error as Error).message
+    return false
   }
-  syncPathParameters(parsePathParameterNames(value))
+}
+
+function switchEditorMode(value: 'visual' | 'json') {
+  if (value === 'json') {
+    syncAdvancedDraft()
+    editorMode.value = value
+    return
+  }
+  if (applyAdvancedDraft()) editorMode.value = value
+}
+
+function updateResponseSchema(value: Record<string, unknown>) {
+  form.response_schema = pretty(value)
 }
 
 function parsePathParameterNames(value: string) {
@@ -378,10 +551,6 @@ function parsePathParameterNames(value: string) {
   for (const match of normalized.matchAll(/\{([A-Za-z_][A-Za-z0-9_]*)}/g)) names.add(match[1])
   for (const match of normalized.matchAll(/(?:^|\/)\:([A-Za-z_][A-Za-z0-9_]*)/g)) names.add(match[1])
   return [...names]
-}
-
-function updateRequestMethod(value: string) {
-  updateRequestConfig({ method: value })
 }
 
 function syncPathParameters(names: string[]) {
@@ -402,18 +571,39 @@ function syncPathParameters(names: string[]) {
 
 async function save() {
   try {
+    if (editorMode.value === 'json' && !applyAdvancedDraft()) return
+    const requestSchema = parseJson<Record<string, unknown>>(form.request_schema, '请求 Schema')
+    const request = parseJson<Record<string, unknown>>(form.request, '请求配置')
+    const responseSchema = parseJson<Record<string, unknown>>(form.response_schema, '响应 Schema')
+    const successContract = parseJson<Record<string, unknown>>(form.success_contract, '成功契约')
+    if (form.protocol === 'http' && typeof requestSchema.accept === 'string') {
+      const accept = requestSchema.accept.trim()
+      const headers = request.headers && typeof request.headers === 'object'
+        && !Array.isArray(request.headers)
+        ? { ...(request.headers as Record<string, unknown>) }
+        : {}
+      Object.keys(headers).forEach((name) => {
+        if (name.toLowerCase() === 'accept') delete headers[name]
+      })
+      if (accept) headers.Accept = accept
+      request.headers = headers
+    }
     const payload: Record<string, unknown> = {
-      project_id: projectId.value, key: form.key, name: form.name, protocol: form.protocol,
+      project_id: projectId.value, key: routeKey.value || form.key, name: form.name, protocol: form.protocol,
       template_id: form.template_id,
       description: form.description,
-      request: parseJson<Record<string, unknown>>(form.request, '请求配置'),
+      request,
+      request_schema: requestSchema,
+      response_schema: responseSchema,
       parameters: parseJson<Record<string, unknown>[]>(form.parameters, '参数说明'),
       examples: parseJson<Record<string, unknown>[]>(form.examples, '参考案例'),
-      success_contract: parseJson<Record<string, unknown>>(form.success_contract, '成功契约'),
+      success_contract: Object.keys(responseSchema).length
+        ? { ...successContract, body_schema: responseSchema }
+        : successContract,
       response_variants: parseJson<Record<string, unknown>[]>(form.response_variants, '响应分支'),
     }
-    if (editingId.value || form.assertion_profile_id !== undefined)
-      payload.assertion_profile_id = form.assertion_profile_id
+    if (editingId.value || form.success_assertion_id !== undefined)
+      payload.success_assertion_id = form.success_assertion_id
     if (editingId.value) await api.definitions.update(editingId.value, payload)
     else await api.definitions.create(payload)
     dialog.value = false
@@ -477,8 +667,8 @@ function openExecute(row: ApiDefinition) {
   executeDialog.value = true
 }
 
-function findProfile(profileId: string | null) {
-  return profiles.value.find((profile) => profile.id === profileId)
+function findAssertion(assertionId: string | null) {
+  return assertions.value.find((assertion) => assertion.id === assertionId)
 }
 
 async function execute() {
@@ -531,8 +721,8 @@ watch(apiSearch, () => { apiPage.value = 1 })
           class="api-list-search"
           :prefix-icon="Search"
           clearable
-          placeholder="搜索名称或 URL"
-          aria-label="搜索 API 名称或 URL"
+          placeholder="搜索名称、Key 或 URL"
+          aria-label="搜索 API 名称、Key 或 URL"
         />
       </div>
     </div>
@@ -559,8 +749,9 @@ watch(apiSearch, () => { apiPage.value = 1 })
       <el-table-column label="URL / 请求目标" min-width="300" align="left" show-overflow-tooltip><template #default="scope"><code>{{ requestTarget(scope.row) }}</code></template></el-table-column>
       <el-table-column label="协议类型" width="100" align="center"><template #default="scope"><el-tag :type="scope.row.protocol === 'http' ? 'success' : 'warning'" effect="dark">{{ scope.row.protocol.toUpperCase() }}</el-tag></template></el-table-column>
       <el-table-column prop="key" label="Key" min-width="180" align="center" show-overflow-tooltip />
+      <el-table-column v-if="activeTab === 'apis'" label="Accept" min-width="170" align="center" show-overflow-tooltip><template #default="scope"><code v-if="scope.row.protocol === 'http'">{{ requestSchemaFor(scope.row).accept || '默认 application/json' }}</code><span v-else class="muted">—</span></template></el-table-column>
       <el-table-column label="模板" min-width="140" align="center"><template #default="scope"><el-tag v-if="findTemplate(scope.row.template_id)" effect="plain">{{ findTemplate(scope.row.template_id)?.name }}</el-tag><span v-else class="muted">无</span></template></el-table-column>
-      <el-table-column label="成功条件集合" min-width="150" align="center"><template #default="scope"><el-tag v-if="findProfile(scope.row.assertion_profile_id)" type="success" effect="plain">{{ findProfile(scope.row.assertion_profile_id)?.name }}</el-tag><span v-else class="muted">无</span></template></el-table-column>
+      <el-table-column label="成功条件" min-width="150" align="center"><template #default="scope"><el-tag v-if="findAssertion(scope.row.success_assertion_id)" type="success" effect="plain">{{ findAssertion(scope.row.success_assertion_id)?.name }}</el-tag><span v-else class="muted">兼容契约</span></template></el-table-column>
       <el-table-column prop="description" label="功能说明" min-width="190" align="left" show-overflow-tooltip />
       <el-table-column label="有效参数" width="90" align="center"><template #default="scope">{{ effectiveParameterCount(scope.row) }}</template></el-table-column>
       <el-table-column label="操作" fixed="right" width="200" align="center"><template #default="scope"><div class="icon-action-group"><el-button class="icon-action-button" link type="success" :icon="VideoPlay" aria-label="执行" @click="openExecute(scope.row)"><span class="icon-action-label">执行</span></el-button><el-button class="icon-action-button" link type="primary" :icon="Edit" aria-label="编辑" @click="openEdit(scope.row)"><span class="icon-action-label">编辑</span></el-button><el-button class="icon-action-button" link type="danger" :icon="Delete" aria-label="删除" @click="remove(scope.row)"><span class="icon-action-label">删除</span></el-button></div></template></el-table-column>
@@ -586,40 +777,64 @@ watch(apiSearch, () => { apiPage.value = 1 })
   <el-dialog v-model="dialog" width="1180px" top="2vh" class="api-editor-dialog">
     <template #header>
       <div class="api-dialog-heading">
-        <h2>{{ editingId ? '编辑 API' : '登记 API' }}</h2>
-        <el-tag :type="form.protocol === 'http' ? 'success' : 'warning'" effect="dark">{{ form.protocol === 'http' ? 'HTTP' : 'WebSocket' }}</el-tag>
+        <div class="api-dialog-title-group">
+          <h2>{{ editingId ? '编辑 API' : '登记 API' }}</h2>
+          <div class="api-dialog-key" :title="displayKey || '未生成稳定 Key'">
+            <span>KEY</span>
+            <code>{{ displayKey || '未生成稳定 Key' }}</code>
+          </div>
+        </div>
+        <div class="api-dialog-header-actions">
+          <el-segmented :model-value="editorMode" :options="[{ label: '可视化', value: 'visual' }, { label: '高级 JSON', value: 'json' }]" aria-label="编辑模式" @update:model-value="switchEditorMode" />
+          <el-tag :type="form.protocol === 'http' ? 'success' : 'warning'" effect="dark">{{ form.protocol === 'http' ? 'HTTP' : 'WebSocket' }}</el-tag>
+        </div>
       </div>
     </template>
-    <el-form label-position="top" class="api-editor-form api-editor-single-page">
-      <section class="api-editor-section">
-        <div class="api-section-heading"><span class="api-section-index">01</span><div><h3>接口信息</h3><p>定义 API 的稳定标识，以及它在文档中的基本描述。</p></div></div>
+    <div v-if="editorMode === 'json'" class="api-advanced-config">
+      <div class="api-advanced-heading">
+        <div><strong>完整 API 配置</strong><p>一次编辑基础信息、请求配置、请求参数、响应字段和成功条件引用；切回可视化前会校验 JSON。</p></div>
+      </div>
+      <el-input v-model="advancedDraft" class="json-input api-advanced-input" type="textarea" :rows="26" spellcheck="false" aria-label="完整 API JSON" />
+      <p v-if="advancedError" class="field-error">{{ advancedError }}</p>
+      <p v-else class="api-advanced-hint">保存时仍会执行请求 Schema、响应 Schema、成功条件和协议一致性校验。</p>
+    </div>
+    <el-form v-else label-position="top" class="api-editor-form api-editor-single-page">
+      <section class="api-editor-section api-editor-section-intro">
+        <div class="api-section-heading"><span class="api-section-index">01</span><div><h3>接口信息</h3><p>定义 API 的稳定身份、请求目标，以及在文档中的基本描述。</p></div></div>
         <div class="api-basic-grid">
-          <el-form-item label="API Key" required><el-input v-model="form.key" placeholder="例如：user.orders.query" /></el-form-item>
           <el-form-item label="API 名称" required><el-input v-model="form.name" placeholder="例如：查询用户订单" /></el-form-item>
           <el-form-item label="API 模板">
             <el-select v-model="form.template_id" clearable placeholder="不使用模板" style="width: 100%" @change="selectTemplate">
               <el-option v-for="item in availableTemplates" :key="item.id" :label="item.name" :value="item.id" />
             </el-select>
           </el-form-item>
-          <el-form-item label="成功断言集合">
-            <el-select v-model="form.assertion_profile_id" clearable placeholder="自动绑定协议默认集合" style="width: 100%">
-              <el-option v-for="item in availableProfiles" :key="item.id" :label="`${item.name}${item.is_default ? '（默认）' : ''}`" :value="item.id" />
+        </div>
+        <div class="api-target-grid" :class="{ 'is-ws': form.protocol === 'ws' }">
+          <el-form-item label="协议" class="api-protocol-field">
+            <el-radio-group :model-value="form.protocol" @update:model-value="switchProtocol"><el-radio-button value="http">HTTP</el-radio-button><el-radio-button value="ws">WS</el-radio-button></el-radio-group>
+          </el-form-item>
+          <el-form-item v-if="form.protocol === 'http'" label="请求方法" class="api-method-field">
+            <el-select :model-value="requestMethod" aria-label="请求方法" style="width: 100%" @update:model-value="updateRequestConfig({ method: $event })">
+              <el-option v-for="method in ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS', 'TRACE']" :key="method" :label="method" :value="method" />
             </el-select>
           </el-form-item>
-        </div>
-        <div class="request-target-fields" :class="{ 'is-http': form.protocol === 'http' }">
-          <el-form-item label="协议"><el-radio-group :model-value="form.protocol" @update:model-value="switchProtocol"><el-radio-button value="http">HTTP</el-radio-button><el-radio-button value="ws">WS</el-radio-button></el-radio-group></el-form-item>
-          <el-form-item v-if="form.protocol === 'http'" label="请求方法">
-            <el-select :model-value="requestMethod" style="width: 100%" @update:model-value="updateRequestMethod">
-              <el-option v-for="method in ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD']" :key="method" :label="method" :value="method" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="请求路径" class="request-address-item">
-            <el-input :model-value="requestAddress" :placeholder="requestAddressPlaceholder" @update:model-value="updateRequestEndpoint" />
-            <div class="request-address-hint"><span>最终地址</span><code>{{ requestEndpoint }}</code></div>
+          <el-form-item :label="form.protocol === 'http' ? '请求目标（URL / 路径）' : 'WebSocket 地址'" class="api-address-field">
+            <div class="endpoint-builder">
+              <div v-if="inheritedRequestBase" class="base-url-prefix" :title="inheritedRequestBase">{{ inheritedRequestBase }}</div>
+              <el-input :model-value="requestAddress" :placeholder="form.protocol === 'http' ? (inheritedRequestBase ? '/users/{user_id}/orders/{order_id}' : '{{ base_url }}/users/{user_id}') : 'wss://example.com/ws/{channel}'" aria-label="请求地址" @update:model-value="updateRequestTarget" />
+            </div>
+            <p v-if="inheritedRequestBase" class="request-target-hint">模板已提供基础地址，这里填写接口相对路径。</p>
           </el-form-item>
         </div>
-        <el-form-item label="功能说明"><el-input v-model="form.description" type="textarea" :rows="2" placeholder="简要说明这个 API 做什么、适用于什么场景" /></el-form-item>
+        <div class="endpoint-preview api-basic-endpoint-preview">
+          <span>最终请求目标</span><code>{{ requestMethod }} {{ requestTargetPreview }}</code>
+        </div>
+        <div v-if="pathParameterNames.length" class="path-param-hint api-basic-path-param-hint">
+          <strong>已识别 Path 参数</strong>
+          <el-tag v-for="name in pathParameterNames" :key="name" type="warning" effect="plain">{{ name }}</el-tag>
+          <span>运行时可通过流程上下文的同名变量渲染。</span>
+        </div>
+        <el-form-item label="功能说明" class="api-description-field"><el-input v-model="form.description" type="textarea" :rows="1" placeholder="简要说明这个 API 做什么、适用于什么场景" /></el-form-item>
       </section>
 
       <div v-if="findTemplate(form.template_id)" class="inheritance-notice">
@@ -627,13 +842,49 @@ watch(apiSearch, () => { apiPage.value = 1 })
         <code>{{ displayRequestBase }}</code>
       </div>
 
-      <section class="api-editor-section">
-        <div class="api-section-heading"><span class="api-section-index">02</span><div><h3>Parameters</h3></div><el-tag type="info" effect="plain">{{ parameterItems.length }} 个参数</el-tag></div>
+      <section class="api-editor-section api-editor-section-request">
+        <div class="api-section-heading"><span class="api-section-index">02</span><div><h3>请求配置</h3><p>维护动态 Query、Header 和 Body 参数契约。</p></div></div>
+        <ApiRequestEditor
+          v-if="form.protocol === 'ws'"
+          v-model="form.request"
+          :protocol="form.protocol"
+        />
         <ApiParametersEditor v-model="parameterItems" :path-params="pathParameterNames" />
       </section>
 
+      <section class="api-editor-section api-editor-section-response">
+        <div class="api-section-heading api-section-heading-with-meta"><span class="api-section-index">03</span><div><h3>响应配置</h3><p>配置响应媒体类型、成功条件和响应字段结构。</p></div></div>
+        <div class="response-config-meta">
+          <el-form-item v-if="form.protocol === 'http'" label="响应媒体类型（Accept）" class="response-accept-field">
+            <el-select
+              v-model="requestSchemaAccept"
+              class="response-accept-select"
+              filterable
+              allow-create
+              clearable
+              default-first-option
+              popper-class="response-accept-popper"
+              placeholder="选择或输入媒体类型"
+            >
+              <el-option v-for="option in commonAcceptOptions" :key="option.value" :label="option.value" :value="option.value">
+                <span>{{ option.label }}</span><code>{{ option.value }}</code>
+              </el-option>
+            </el-select>
+          </el-form-item>
+          <el-form-item label="成功条件" class="response-success-assertion-field">
+            <el-select v-model="form.success_assertion_id" clearable placeholder="选择一个成功条件">
+              <el-option v-for="item in assertions" :key="item.id" :label="item.name" :value="item.id">
+                <span>{{ item.name }}</span><code class="select-option-key">{{ item.key }}</code>
+              </el-option>
+            </el-select>
+            <div class="muted">API 只执行这一个成功条件；未选择时保留历史成功契约兼容逻辑。</div>
+          </el-form-item>
+        </div>
+        <ApiResponseFieldsEditor :model-value="responseSchemaConfig" @update:model-value="updateResponseSchema" />
+      </section>
+
     </el-form>
-    <template #footer><el-button @click="dialog = false">取消</el-button><el-button type="primary" :disabled="!form.key || !form.name" @click="save">保存</el-button></template>
+    <template #footer><el-button @click="dialog = false">取消</el-button><el-button type="primary" :disabled="!displayKey || !form.name" @click="save">保存</el-button></template>
   </el-dialog>
 
   <el-dialog v-model="templateDialog" :title="editingTemplateId ? '编辑 API 模板' : '新建 API 模板'" width="700px">

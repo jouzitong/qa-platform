@@ -24,12 +24,6 @@ _ASSET_FILES = {
         "assertions.json",
         "assertion.json",
     ),
-    "assertion_profiles": (
-        "assertion_profiles.json",
-        "assertion-profiles.json",
-        "profiles.json",
-        "profile.json",
-    ),
     "flows": ("flows.json", "flow.json"),
     "test_plans": ("test_plans.json", "plans.json", "plan.json"),
 }
@@ -156,7 +150,6 @@ def parse_import_archive(filename: str, content: bytes) -> dict[str, Any]:
         "api_templates": [],
         "apis": [],
         "assertion_definitions": [],
-        "assertion_profiles": [],
         "flows": [],
         "test_plans": [],
         "warnings": list(_manifest_value(manifest, "warnings", []) or []),
@@ -165,6 +158,13 @@ def parse_import_archive(filename: str, content: bytes) -> dict[str, Any]:
         if label == "project":
             continue
         package[label] = _read_json(files, names, label)
+
+    if any(
+        path.rsplit("/", 1)[-1].lower()
+        in {"assertion_profiles.json", "assertion-profiles.json", "profiles.json", "profile.json"}
+        for path in files
+    ):
+        package["warnings"].append("导入包包含已废弃的成功条件集合，已忽略；请在 API 上直接配置成功条件")
 
     interfaces = manifest.get("interfaces", {})
     if isinstance(interfaces, dict):

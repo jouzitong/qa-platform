@@ -54,7 +54,7 @@ function remove(index: number) {
 <template>
   <div class="parameters-editor">
     <div class="editor-mode-bar">
-      <div><strong>参数说明</strong><p class="muted">这里统一维护 API 参数契约和默认值，调用方未传值时系统会自动使用默认值。</p></div>
+      <div><strong>动态参数</strong><p class="muted">这里统一维护参数契约和默认值，调用方未传值时系统会自动使用默认值。</p></div>
       <el-button type="primary" plain :icon="Plus" @click="add()">添加参数</el-button>
     </div>
     <el-segmented v-model="filter" :options="filters" class="parameter-filters" />

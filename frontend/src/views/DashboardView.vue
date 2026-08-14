@@ -80,7 +80,7 @@ function importActionType(action: string) {
 function importTypeLabel(type: string) {
   return {
     project: '项目', api_templates: 'API 模板', apis: 'API',
-    assertion_definitions: '原子断言', assertion_profiles: '断言集合',
+    assertion_definitions: '成功条件',
     flows: '测试流程', test_plans: '测试计划',
   }[type] || type
 }

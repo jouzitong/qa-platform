@@ -12,7 +12,7 @@
 - 流程编排：按顺序组合 API，支持步骤开关、请求覆盖和拖动式顺序调整（当前为上移/下移）。
 - 上下文：按 `项目变量 < 流程变量 < 本次输入 < 步骤提取值` 的优先级合并。
 - 模板：在 URL、请求头、查询参数、Body、WS 消息中使用 `{{ variable.path }}`。
-- 可复用断言：项目级原子断言与断言集合，支持按 HTTP/WS 设置默认集合，新 API 自动绑定。
+- 成功条件：项目级成功条件，API 直接绑定一个条件；未绑定的新/历史 API 继续兼容内置成功契约。
 - 校验与提取：支持路径比较、JSON Schema、安全 Python 风格表达式、响应分支，并将响应值提取给后续步骤。
 - 失败重试：配置最大尝试次数、间隔和指数退避倍数，每次尝试单独留痕。
 - 运行观察：保存请求/响应快照，敏感请求头脱敏；通过 WebSocket 推送运行事件。
@@ -176,7 +176,7 @@ HTTP API 请求配置：
       "type": "object",
       "required": ["code"]
     },
-    "assertion_profile_ids": ["profile-id"],
+    "assertions": [],
     "disabled_assertion_ids": [],
     "assertions": []
   }
@@ -212,8 +212,8 @@ HTTP API 请求配置：
 - `Project`：项目及默认变量。
 - `ApiTemplate`：项目级 HTTP/WS 公共配置，可被多个 API 实时引用。
 - `ApiDefinition`：协议、请求定义、参数说明与案例。
-- `AssertionDefinition`：项目级原子断言、引擎配置、默认参数和严重级别。
-- `AssertionProfile`：按协议组合原子断言，可作为项目默认集合。
+- `AssertionDefinition`：项目级成功条件、引擎配置、默认参数和严重级别。
+- `ApiDefinition.success_assertion_id`：API 直接引用的成功条件。
 - `TestFlow`：流程变量及有序步骤定义。
 - `TestRun`：一次运行的输入、最终上下文和状态。
 - `StepRun`：步骤的单次尝试、耗时、快照、完整断言结果、提取值和错误。

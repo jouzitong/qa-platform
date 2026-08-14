@@ -1,3 +1,4 @@
+import json
 from collections.abc import Generator
 
 from sqlalchemy import create_engine, event, inspect
@@ -66,10 +67,44 @@ def ensure_schema_compatibility() -> None:
             connection.exec_driver_sql(
                 "ALTER TABLE api_definitions ADD COLUMN template_id VARCHAR(36)"
             )
-        if "assertion_profile_id" not in columns:
+        if "success_assertion_id" not in columns:
             connection.exec_driver_sql(
-                "ALTER TABLE api_definitions ADD COLUMN assertion_profile_id VARCHAR(36)"
+                "ALTER TABLE api_definitions ADD COLUMN success_assertion_id VARCHAR(36)"
             )
+        if "assertion_profile_id" in columns and "assertion_profiles" in tables:
+            legacy_rows = connection.exec_driver_sql(
+                "SELECT id, project_id, assertion_profile_id FROM api_definitions "
+                "WHERE success_assertion_id IS NULL AND assertion_profile_id IS NOT NULL"
+            ).fetchall()
+            for api_id, project_id, profile_id in legacy_rows:
+                profile_row = connection.exec_driver_sql(
+                    "SELECT bindings FROM assertion_profiles WHERE id = ? AND project_id = ?",
+                    (profile_id, project_id),
+                ).fetchone()
+                if not profile_row:
+                    continue
+                try:
+                    bindings = json.loads(profile_row[0] or "[]")
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                enabled_ids = [
+                    str(binding.get("assertion_id"))
+                    for binding in bindings
+                    if isinstance(binding, dict)
+                    and binding.get("enabled", True)
+                    and binding.get("assertion_id")
+                ]
+                if len(enabled_ids) != 1:
+                    continue
+                assertion_exists = connection.exec_driver_sql(
+                    "SELECT 1 FROM assertion_definitions WHERE id = ? AND project_id = ?",
+                    (enabled_ids[0], project_id),
+                ).fetchone()
+                if assertion_exists:
+                    connection.exec_driver_sql(
+                        "UPDATE api_definitions SET success_assertion_id = ? WHERE id = ?",
+                        (enabled_ids[0], api_id),
+                    )
         if "response_variants" not in columns:
             connection.exec_driver_sql(
                 "ALTER TABLE api_definitions ADD COLUMN response_variants JSON DEFAULT '[]'"
@@ -77,6 +112,14 @@ def ensure_schema_compatibility() -> None:
         if "success_contract" not in columns:
             connection.exec_driver_sql(
                 "ALTER TABLE api_definitions ADD COLUMN success_contract JSON DEFAULT '{}'"
+            )
+        if "request_schema" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE api_definitions ADD COLUMN request_schema JSON DEFAULT '{}'"
+            )
+        if "response_schema" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE api_definitions ADD COLUMN response_schema JSON DEFAULT '{}'"
             )
         if "api_templates" in inspector.get_table_names():
             template_columns = {

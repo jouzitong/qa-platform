@@ -7,7 +7,7 @@ from app.database import Base
 from app.execution.expression import ExpressionError, evaluate_expression
 from app.execution.validation import validate_api_response
 from app.main import app
-from app.models import ApiDefinition, AssertionDefinition, AssertionProfile, Project
+from app.models import ApiDefinition, AssertionDefinition, Project
 from app.success_contract import default_success_contract
 
 
@@ -136,11 +136,11 @@ def test_success_contract_requires_status_and_success_body() -> None:
         assert disabled_system_rules["passed"] is False
 
 
-def test_success_profile_is_the_source_of_truth_over_legacy_contract() -> None:
+def test_success_assertion_is_the_source_of_truth_over_legacy_contract() -> None:
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
     with Session(engine, expire_on_commit=False) as session:
-        project = Project(name="success-profile-project")
+        project = Project(name="success-condition-project")
         session.add(project)
         session.flush()
         definition = AssertionDefinition(
@@ -153,20 +153,12 @@ def test_success_profile_is_the_source_of_truth_over_legacy_contract() -> None:
         )
         session.add(definition)
         session.flush()
-        profile = AssertionProfile(
-            project_id=project.id,
-            name="登录成功条件",
-            protocol="http",
-            bindings=[{"assertion_id": definition.id}],
-        )
-        session.add(profile)
-        session.flush()
         api = ApiDefinition(
             project_id=project.id,
-            key="profile-driven",
-            name="profile-driven",
+            key="assertion-driven",
+            name="assertion-driven",
             protocol="http",
-            assertion_profile_id=profile.id,
+            success_assertion_id=definition.id,
             success_contract=default_success_contract(),
         )
         session.add(api)
@@ -182,10 +174,10 @@ def test_success_profile_is_the_source_of_truth_over_legacy_contract() -> None:
 
         assert validation["passed"] is True
         assert validation["success_contract"] is False
-        assert validation["success_profile_id"] == profile.id
+        assert validation["success_assertion_id"] == definition.id
 
 
-def test_default_profile_is_bound_only_to_new_apis() -> None:
+def test_api_directly_references_one_success_assertion() -> None:
     with TestClient(app) as client:
         project = client.post(
             "/api/v1/projects", json={"name": "assertion-default-project"}
@@ -203,18 +195,6 @@ def test_default_profile_is_bound_only_to_new_apis() -> None:
         )
         assert definition.status_code == 201
         assert definition.json()["severity"] == "success"
-        profile = client.post(
-            "/api/v1/assertion-profiles",
-            json={
-                "project_id": project["id"],
-                "name": "default-http",
-                "protocol": "http",
-                "is_default": True,
-                "bindings": [{"assertion_id": definition.json()["id"], "params": {}}],
-            },
-        )
-        assert profile.status_code == 201
-
         api_response = client.post(
             "/api/v1/apis",
             json={
@@ -222,11 +202,12 @@ def test_default_profile_is_bound_only_to_new_apis() -> None:
                 "key": "health-with-default",
                 "name": "health-with-default",
                 "protocol": "http",
+                "success_assertion_id": definition.json()["id"],
                 "request": {"url": "https://example.test"},
             },
         )
         assert api_response.status_code == 201
-        assert api_response.json()["assertion_profile_id"] == profile.json()["id"]
+        assert api_response.json()["success_assertion_id"] == definition.json()["id"]
 
         unbound = client.post(
             "/api/v1/apis",
@@ -235,15 +216,15 @@ def test_default_profile_is_bound_only_to_new_apis() -> None:
                 "key": "health-explicitly-unbound",
                 "name": "health-explicitly-unbound",
                 "protocol": "http",
-                "assertion_profile_id": None,
                 "request": {"url": "https://example.test"},
             },
         )
         assert unbound.status_code == 201
-        assert unbound.json()["assertion_profile_id"] is None
+        assert unbound.json()["success_assertion_id"] is None
+        assert client.get("/api/v1/assertion-profiles").status_code == 404
 
 
-def test_legacy_response_variant_collects_profile_and_schema_results() -> None:
+def test_legacy_response_variant_collects_assertion_and_schema_results() -> None:
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
     with Session(engine, expire_on_commit=False) as session:
@@ -262,14 +243,6 @@ def test_legacy_response_variant_collects_profile_and_schema_results() -> None:
         )
         session.add(definition)
         session.flush()
-        profile = AssertionProfile(
-            project_id=project.id,
-            name="success",
-            protocol="http",
-            bindings=[{"assertion_id": definition.id}],
-        )
-        session.add(profile)
-        session.flush()
         api = ApiDefinition(
             project_id=project.id,
             key="order-not-found",
@@ -279,7 +252,6 @@ def test_legacy_response_variant_collects_profile_and_schema_results() -> None:
                 {
                     "name": "not-found",
                     "match": "response.status_code == 404",
-                    "assertion_profile_ids": [profile.id],
                     "schema": {
                         "type": "object",
                         "required": ["code"],
@@ -317,6 +289,6 @@ def test_legacy_response_variant_collects_profile_and_schema_results() -> None:
 
         assert validation["passed"] is True
         assert validation["variant"] == "not-found"
-        assert len(validation["results"]) == 3
+        assert len(validation["results"]) == 2
         assert validation["results"][0]["severity"] == "success"
         assert validation["results"][0]["passed"] is True

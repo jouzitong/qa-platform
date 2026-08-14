@@ -46,15 +46,41 @@ def test_project_api_round_trip() -> None:
                 "name": "health",
                 "protocol": "http",
                 "request": {"method": "GET", "path": "/health"},
+                "request_schema": {
+                    "accept": "application/vnd.health+json",
+                    "schema": {"type": "object", "required": ["status"]},
+                },
+                "response_schema": {
+                    "type": "object",
+                    "required": ["status"],
+                    "properties": {"status": {"type": "string", "example": "ok"}},
+                },
             },
         )
         assert response.status_code == 201
         assert response.json()["key"] == "health"
         assert response.json()["request"]["headers"] == {
             "X-trade-id": "{{ random.uuid(32) }}",
-            "Accept": "application/json",
+            "Accept": "application/vnd.health+json",
         }
+        assert response.json()["request_schema"]["accept"] == "application/vnd.health+json"
+        assert response.json()["request_schema"]["schema"]["required"] == ["status"]
+        assert response.json()["response_schema"]["properties"]["status"]["example"] == "ok"
+        assert response.json()["success_contract"]["body_schema"] == response.json()["response_schema"]
         api_id = response.json()["id"]
+
+        updated_response_schema = {
+            "type": "object",
+            "required": ["code"],
+            "properties": {"code": {"type": "integer", "const": 0}},
+        }
+        response = client.patch(
+            f"/api/v1/apis/{api_id}",
+            json={"response_schema": updated_response_schema},
+        )
+        assert response.status_code == 200
+        assert response.json()["response_schema"] == updated_response_schema
+        assert response.json()["success_contract"]["body_schema"] == updated_response_schema
 
         websocket_response = client.post(
             "/api/v1/apis",

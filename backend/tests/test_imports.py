@@ -30,7 +30,12 @@ def make_archive(*, name: str = "imported-project", api_name: str = "健康检�
                     "key": "health",
                     "name": api_name,
                     "protocol": "http",
+                    "success_assertion_key": "success",
                     "request": {"method": "GET", "path": "/health"},
+                    "request_schema": {
+                        "accept": "application/vnd.health+json",
+                        "schema": {"type": "object", "required": ["status"]},
+                    },
                 }
             ],
             ensure_ascii=False,
@@ -43,17 +48,6 @@ def make_archive(*, name: str = "imported-project", api_name: str = "健康检�
                     "name": "成功响应",
                     "engine": "expression",
                     "config": {"expression": "response.status_code == 200"},
-                }
-            ],
-            ensure_ascii=False,
-        ),
-        "v1.0.0/profiles.json": json.dumps(
-            [
-                {
-                    "id": "source-profile-1",
-                    "name": "默认成功集合",
-                    "protocol": "http",
-                    "bindings": [{"assertion_id": "source-assertion-1", "enabled": True}],
                 }
             ],
             ensure_ascii=False,
@@ -115,15 +109,16 @@ def test_import_preview_requires_approval_and_applies_assets_atomically() -> Non
         apis = client.get(f"/api/v1/apis?project_id={project['id']}").json()
         flows = client.get(f"/api/v1/flows?project_id={project['id']}").json()
         plans = client.get(f"/api/v1/test-plans?project_id={project['id']}").json()
-        profiles = client.get(f"/api/v1/assertion-profiles?project_id={project['id']}").json()
         assert apis[0]["name"] == "健康检查"
-        assert apis[0]["request"]["headers"]["Accept"] == "application/json"
+        assert apis[0]["request"]["headers"]["Accept"] == "application/vnd.health+json"
+        assert apis[0]["request_schema"]["accept"] == "application/vnd.health+json"
+        assert apis[0]["request_schema"]["schema"]["required"] == ["status"]
         assert flows[0]["steps"][0]["api_id"] == apis[0]["id"]
         assert plans[0]["items"][0]["target_id"] == apis[0]["id"]
         assertion = client.get(f"/api/v1/assertion-definitions?project_id={project['id']}").json()[
             0
         ]
-        assert profiles[0]["bindings"][0]["assertion_id"] == assertion["id"]
+        assert apis[0]["success_assertion_id"] == assertion["id"]
 
 
 def test_import_update_preview_and_reject_do_not_apply() -> None:
