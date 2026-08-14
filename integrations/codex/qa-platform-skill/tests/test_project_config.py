@@ -62,14 +62,19 @@ class ProjectConfigTests(unittest.TestCase):
             )
             config = json.loads((root / ".qa-platform.json").read_text(encoding="utf-8"))
             self.assertEqual(config["base_url"], "http://localhost:8000")
+            self.assertEqual(config["project"]["name"], root.name)
             self.assertEqual(config["variables"], {"base_url": "127.0.0.1:9764"})
+            self.assertEqual(config["api_templates"], [])
+            self.assertEqual(config["flow_documents"], [])
+            self.assertTrue(config["openapi"]["auto_discover"])
+            self.assertFalse(config["openapi"]["runtime_discovery"]["enabled"])
             self.assertEqual(
-                config["success_assertions"]["default_profile"]["http"],
-                "config:http-success",
+                config["success_assertions"]["default_assertion"]["http"],
+                "config:http-success-status",
             )
             self.assertEqual(
-                config["success_assertions"]["default_profile"]["ws"],
-                "config:ws-success",
+                config["success_assertions"]["default_assertion"]["ws"],
+                "config:ws-success-messages",
             )
 
             (root / "app.py").write_text(
@@ -87,8 +92,8 @@ class ProjectConfigTests(unittest.TestCase):
             self.assertEqual(result["project"]["variables"], {"base_url": "127.0.0.1:9764"})
             self.assertEqual(result["success_assertions"]["source"], "project_config")
             self.assertEqual(
-                result["interfaces"]["http"][0]["assertion_profile_key"],
-                "config:http-success",
+                result["interfaces"]["http"][0]["success_assertion_key"],
+                "config:http-success-status",
             )
 
 

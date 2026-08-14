@@ -1,4 +1,4 @@
 interface:
   display_name: "QA Platform Scanner"
-  short_description: "扫描接口并生成待审核流程与版本计划"
-  default_prompt: "Use $qa-platform-skill to scan all HTTP/WS interfaces, assign business keys, detect the gateway, and generate a validated versioned qa-platform import package with draft flows and plans."
+  short_description: "稳定扫描 API、读取流程文档并生成模块化导入包"
+  default_prompt: "Use $qa-platform-skill to deterministically convert OpenAPI/Swagger contracts, scan remaining HTTP/WS routes, read configured flow documents, refine draft flow modules, validate the module directory, and build a versioned qa-platform ZIP."

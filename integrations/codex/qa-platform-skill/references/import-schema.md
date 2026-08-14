@@ -1,6 +1,6 @@
 # qa-platform import schema
 
-The scanner emits a JSON document with `format: "qa-platform-import"` and a semver-like `version`. The first implementation targets version `1.0`.
+The scanner emits an authoritative multi-file scan bundle and a compatibility JSON document with `format: "qa-platform-import"`. The first implementation targets import version `1.0`. Validate and build from the module directory; `qa-platform-import.json` exists for older consumers and inspection only.
 
 ## Top-level shape
 
@@ -73,16 +73,20 @@ The scanner emits a JSON document with `format: "qa-platform-import"` and a semv
     "http": [],
     "ws": []
   },
+  "api_templates": [],
   "assertion_definitions": [],
-  "assertion_profiles": [],
   "success_assertions": {
     "source": "project_config",
-    "default_profiles": {"http": "config:http-success", "ws": "config:ws-success"},
+    "default_assertions": {"http": "config:http-success-status", "ws": "config:ws-success-messages"},
     "detected_success_codes": [],
-    "profile_keys": ["config:http-success", "config:ws-success"]
+    "success_assertion_keys": ["config:http-success-status", "config:ws-success-messages"]
   },
   "features": [],
   "test_cases": [],
+  "flow_documents": {
+    "documents": [],
+    "structured_flow_keys": []
+  },
   "flows": [],
   "test_plans": [],
   "warnings": []
@@ -91,17 +95,38 @@ The scanner emits a JSON document with `format: "qa-platform-import"` and a semv
 
 `version` is the schema format version. `package_version` is the test/release version used for generated plans and the version directory in the ZIP. They must not be conflated. `source.release_version` records the resolved value, the metadata source, and (when relevant) the raw source value. The resolver uses CLI/config overrides first, then Maven, Python, Node, Gradle, and a root version file. A terminal `-SNAPSHOT` is removed, while other qualifiers are preserved. `language` records the selected display language and its evidence; generated names/descriptions follow it while stable keys remain language-neutral. `storage` records where the scan manifest and archive are kept locally; it is metadata and does not grant the importer filesystem access.
 
+## Editable module bundle
+
+The default `releases/<package_version>/` scan directory contains:
+
+```text
+manifest.json                # module index and scan metadata
+project.json                 # project identity and variables
+api_templates.json           # reusable project API templates
+assertion_definitions.json   # reusable success conditions
+inventory.json               # features and scanner-only test cases
+flow_documents.json          # AI-readable local guidance plus document hashes
+api.json                     # scanner API records
+flow.json                    # independently editable draft flows
+plans.json                   # independently editable version plan
+qa-platform-import.json      # compatibility aggregate snapshot
+```
+
+`manifest.json` uses `format: "qa-platform-scan-bundle"` and maps logical module names to filenames. `validate-import.py`, `diff-import.py`, and `build_import_archive.py` accept this directory or its `manifest.json`. Module files are authoritative after generation: if AI or a reviewer updates `flow.json`, build the ZIP from the directory so the compatibility snapshot does not overwrite that work.
+
+The local `flow_documents.json` may include source prose in each document's `content` field so AI can read it. The compatibility aggregate and final ZIP strip `content`, retaining only path, format, hash, size, usage, and structured-flow keys.
+
 ## Stable keys
 
-Use business-oriented keys for imported entities:
+Use deterministic route keys for imported HTTP/WS interfaces and business-oriented keys for higher-level assets:
 
-- API/WS: `user.auth.login`, `user.auth.logout`, or another dot-separated business key.
+- API/WS: `http:<METHOD>:<path>` or `ws:<path-or-url>`.
 - Feature: `feature:<business-key>` or `page:<normalized-route>`.
 - Test case: `case:<api-business-key>:smoke`.
 - Flow: `flow:<feature-business-key>`.
 - Test plan: `plan:<project-key>:<version-slug>:smoke` (exactly one per `package_version`).
 
-Derive an API key from OpenAPI `operationId`/`x-business-key` first, then meaningful route segments after removing generic `api`/version prefixes. Keep at most four meaningful segments. If two routes produce the same key, append `:<method>` and then a numeric suffix. `identity_key` remains the protocol/method/path identity used to merge duplicate source references; it is not the display key.
+Derive an API key directly from the normalized protocol, method, and route. OpenAPI `operationId`/`x-business-key` may still be used for feature grouping and display labels, but must not change the interface key. Duplicate source references for the same route are merged in memory and retained in `source_refs`; no separate `identity_key` is emitted.
 
 Keys are external identifiers. qa-platform should persist the API/flow/plan `key` (or an equivalent external-key field) and use it for upsert and repeat-import detection. Names are display labels and are not safe deduplication keys.
 
@@ -111,18 +136,16 @@ Every interface should include:
 
 ```json
 {
-  "key": "orders.list",
-  "business_key": "orders.list",
-  "identity_key": "http:GET:/api/orders",
+  "key": "http:GET:/api/orders",
   "protocol": "http",
   "method": "GET",
   "path": "/api/orders",
   "name": "List orders",
   "service": "order-service",
   "parameters": [],
-  "request_schema": {},
+  "request_schema": {"accept": "application/json", "schema": {}},
   "response_schema": {},
-  "assertion_profile_key": "config:http-success",
+  "success_assertion_key": "config:http-success-status",
   "auth": "unknown",
   "tags": [],
   "source_refs": [
@@ -154,23 +177,65 @@ The execution engine writes `path`, `query`, `header`, and top-level JSON `body`
 
 ## Project-configured success assertions
 
-`.qa-platform.json` can declare the default assertion profile and the assets needed to initialize it. `init_project_config.py` writes a safe HTTP/WS starter section. An AI may add project-specific definitions and profiles after inspecting source facts, but the result remains draft configuration for human review.
+`.qa-platform.json` can declare one default success condition per protocol and the definitions needed to initialize it. `init_project_config.py` writes a safe HTTP/WS starter section. An AI may add project-specific definitions after inspecting source facts, but the result remains draft configuration for human review.
 
 ```json
 {
   "success_assertions": {
-    "default_profile": {"http": "config:http-success", "ws": "config:ws-success"},
+    "default_assertion": {"http": "config:http-success-status", "ws": "config:ws-success-messages"},
     "definitions": [
       {"key": "config:http-success-status", "name": "默认 HTTP 成功状态码", "engine": "expression", "config": {"expression": "response.status_code >= 200 and response.status_code <= 299"}, "default_params": {}, "severity": "success", "message": "HTTP 状态码不在 200–299 范围内"}
-    ],
-    "profiles": [
-      {"name": "config:http-success", "protocol": "http", "description": "项目默认 HTTP 成功断言集合", "is_default": true, "bindings": [{"assertion_id": "config:http-success-status", "enabled": true}]}
     ]
   }
 }
 ```
 
-Each configured default must reference a profile in the same config, use the matching protocol, and bind only declared definition keys. During scan, every HTTP/WS API receives its corresponding configured `assertion_profile_key`; invalid or missing referenced profiles fail validation instead of falling back silently. Projects without this section retain the legacy inferred-system profile for compatibility.
+Each configured default must reference a definition in the same config. During scan, every HTTP/WS API receives its corresponding configured `success_assertion_key`; invalid or missing referenced definitions fail validation instead of falling back silently.
+
+## Project metadata and reusable API templates
+
+`.qa-platform.json` may own project metadata and importable templates:
+
+```json
+{
+  "project": {
+    "key": "order-system",
+    "name": "Order System",
+    "description": "订单域接口与测试流程。"
+  },
+  "variables": {"base_url": "127.0.0.1:9764"},
+  "api_templates": [
+    {
+      "key": "order-auth",
+      "name": "订单鉴权模板",
+      "protocol": "http",
+      "description": "订单接口公共请求配置。",
+      "request": {"headers": {"Authorization": "{{ access_token }}"}},
+      "parameters": [],
+      "examples": [],
+      "match": {"methods": ["POST", "PUT"], "path_prefix": "/api/orders"}
+    }
+  ]
+}
+```
+
+Template `match` supports `protocol`, `method`/`methods`, `key`/`keys`, `path`/`paths`, `path_prefix`, `path_regex`, and `tags`. All specified constraints must match. If multiple templates match, configuration order wins and the API receives a warning. The archive imports template records before APIs and resolves API `template_key` references by template key/name.
+
+## Flow documents
+
+`flow_documents` accepts project-relative Markdown, AsciiDoc, text, JSON, or YAML files. A string is shorthand for a required document:
+
+```json
+{
+  "flow_documents": [
+    "docs/test-flows.md",
+    {"path": "qa/checkout-flow.json", "required": true},
+    {"path": "docs/optional-notes.adoc", "required": false}
+  ]
+}
+```
+
+Standalone JSON/YAML accepts one flow, a flow array, or `{ "flows": [...] }`. Markdown may contain fenced `qa-platform-flow` JSON or `qa-platform-flow-yaml` blocks. Each step references an API with `interface_key`/`api_key`, or with `method` plus `path` (WebSocket uses `protocol: "ws"` plus `url`). Unknown references fail the scan. Structured flows retain document `source_refs`, are inserted before heuristic flows, and suppress duplicate inferred coverage. Prose-only documents remain guidance for AI to update `flow.json`; such AI output stays draft and disabled.
 
 ## Features, cases, and flows
 
@@ -257,7 +322,7 @@ The scanner's `import_decision` is a comparison result, not an instruction to mu
 
 ## Import mapping
 
-Map `project` to `Project`, `assertion_definitions` to atomic assertion definitions, `assertion_profiles` to assertion profiles, `interfaces.http/ws` to `ApiDefinition`, `flows` to `TestFlow`, and `test_plans` to `TestPlan`. `project.variables.base_url` is required and must be an `ip:port` value without a URL scheme; qa-platform adds `http://` when resolving it. API `assertion_profile_key` values resolve to the imported or existing profile name and must match the configured default when `success_assertions.source` is `project_config`. `features` and `test_cases` are retained in the scanner JSON and ZIP `inventory.json`; the current qa-platform importer warns and skips them because there is no standalone feature or test-case model. The archive builder maps each API's `success_contract` into the API asset as a compatibility fallback.
+Map `project` to `Project`, `api_templates` to `ApiTemplate`, `assertion_definitions` to success conditions, `interfaces.http/ws` to `ApiDefinition`, `flows` to `TestFlow`, and `test_plans` to `TestPlan`. `project.variables.base_url` is required and must be an `ip:port` value without a URL scheme; qa-platform adds `http://` when resolving it. API `template_key` and `success_assertion_key` values resolve to imported or existing assets. `features` and `test_cases` are retained in the scanner JSON and ZIP `inventory.json`; the current qa-platform importer warns and skips them because there is no standalone feature or test-case model. The archive builder maps each API's `success_contract` into the API asset as a compatibility fallback.
 
 ## ZIP mapping
 
@@ -266,9 +331,10 @@ The archive consumed by the current import center is:
 ```text
 manifest.json       # package_version, source, architecture, import_decision, warnings
 project.json        # project metadata and variables
+api_templates.json  # reusable API templates
 inventory.json      # scanner-only features and test_cases
-assertion_definitions.json # atomic success assertion definitions
-assertion_profiles.json    # API-referenced success assertion profiles
+flow_documents.json # source metadata only; prose content is stripped
+assertion_definitions.json # success condition definitions
 <version>/api.json  # HTTP and WS API assets
 <version>/flow.json # flow assets with api_key references
 <version>/plans.json# test plan assets with target_key references

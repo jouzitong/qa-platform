@@ -1,8 +1,10 @@
 # Codex QA Platform Scanner
 
-`integrations/codex/qa-platform-skill` is the canonical source of the QA Platform Codex Skill. It scans an arbitrary target project without modifying it, produces a versioned `qa-platform-import` ZIP, and may create a pending import preview. The Skill never approves an import.
+`integrations/codex/qa-platform-skill` is the canonical source of the QA Platform Codex Skill. It scans an arbitrary target project without modifying source code, deterministically converts OpenAPI/Swagger/AsyncAPI, reads project-configured flow documents, produces independently editable module JSON files, packages a versioned `qa-platform-import` ZIP, and may create a pending import preview. The Skill never approves an import.
 
-The platform owns the ZIP parser, preview, approval, and application of assets. The Skill owns static discovery, manifest construction, ZIP construction, and preview submission. Keep the boundary versioned and verify it with the repository's cross-boundary test before changing either side.
+The platform owns the ZIP parser, preview, approval, and application of assets. The Skill owns static/configured runtime API-document discovery, module construction, documented draft-flow preparation, ZIP construction, and preview submission. Keep the boundary versioned and verify it with the repository's cross-boundary test before changing either side.
+
+The default scan bucket is `releases/<package_version>/`. Its `manifest.json`, `project.json`, `api_templates.json`, `assertion_definitions.json`, `inventory.json`, `flow_documents.json`, `api.json`, `flow.json`, and `plans.json` are authoritative; `qa-platform-import.json` is a compatibility snapshot. Validate and build the ZIP from the directory so AI/reviewer edits to an individual module are preserved.
 
 ## Install or update
 

@@ -16,10 +16,52 @@ VALIDATE = SKILL_ROOT / "scripts" / "validate-import.py"
 BUILD_ARCHIVE = SKILL_ROOT / "scripts" / "build_import_archive.py"
 sys.path.insert(0, str(SKILL_ROOT / "scripts"))
 
-from scan_project import detect_architecture, discover_files
+from scan_project import detect_architecture, discover_files, ensure_interface
 
 
 class ScanParameterTests(unittest.TestCase):
+    def test_interfaces_use_route_key_and_merge_duplicate_source_refs(self) -> None:
+        interfaces = {"http": {}, "ws": {}}
+
+        first = ensure_interface(
+            interfaces,
+            "http",
+            "/api/auth/signin",
+            Path("demo"),
+            {"file": "routes.py", "line": 10},
+            method="POST",
+            business_key="auth.signin",
+        )
+        duplicate = ensure_interface(
+            interfaces,
+            "http",
+            "/api/auth/signin",
+            Path("demo"),
+            {"file": "controller.py", "line": 20},
+            method="POST",
+        )
+        get_variant = ensure_interface(
+            interfaces,
+            "http",
+            "/api/auth/signin",
+            Path("demo"),
+            {"file": "controller.py", "line": 30},
+            method="GET",
+        )
+
+        self.assertIs(first, duplicate)
+        self.assertEqual(first["key"], "http:POST:/api/auth/signin")
+        self.assertEqual(get_variant["key"], "http:GET:/api/auth/signin")
+        self.assertNotIn("identity_key", first)
+        self.assertNotIn("business_key", first)
+        self.assertEqual(
+            first["source_refs"],
+            [
+                {"file": "routes.py", "line": 10},
+                {"file": "controller.py", "line": 20},
+            ],
+        )
+
     def test_spring_websocket_configurer_handlers_are_discovered_with_context_path(
         self,
     ) -> None:
@@ -218,7 +260,7 @@ class ScanParameterTests(unittest.TestCase):
                     {item["url"] for item in manifest["interfaces"]["ws"]},
                 )
 
-    def test_system_success_assertion_profile_is_referenced_by_generated_api(self) -> None:
+    def test_system_success_assertion_is_referenced_by_generated_api(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / ".qa-platform.json").write_text(
@@ -260,18 +302,11 @@ class ScanParameterTests(unittest.TestCase):
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
             api = next(item for item in manifest["interfaces"]["http"] if item["path"] == "/health")
-            profile_key = api["assertion_profile_key"]
-            profile = next(item for item in manifest["assertion_profiles"] if item["name"] == profile_key)
+            assertion_key = api["success_assertion_key"]
             definitions = {item["key"]: item for item in manifest["assertion_definitions"]}
-            binding_keys = {item["assertion_id"] for item in profile["bindings"]}
 
-            self.assertIn("system:success-status", binding_keys)
-            body_key = next(
-                key
-                for key in binding_keys
-                if key == "system:success-body-schema" or key.startswith("system:success-body-schema:")
-            )
-            self.assertEqual(definitions[body_key]["config"]["schema"]["properties"]["code"], {"const": 1})
+            self.assertEqual(assertion_key, "system:success-status")
+            self.assertIn(assertion_key, definitions)
             self.assertEqual(manifest["success_assertions"]["detected_success_codes"][0]["value"], 1)
 
             archive_path = root / "qa-platform-import.zip"
@@ -283,11 +318,11 @@ class ScanParameterTests(unittest.TestCase):
             )
             with zipfile.ZipFile(archive_path) as archive:
                 self.assertIn("assertion_definitions.json", archive.namelist())
-                self.assertIn("assertion_profiles.json", archive.namelist())
+                self.assertNotIn("assertion_profiles.json", archive.namelist())
                 project = json.loads(archive.read("project.json"))
                 self.assertEqual(project["variables"]["base_url"], "127.0.0.1:9764")
                 imported_api = json.loads(archive.read("v1.0.0/api.json"))[0]
-                self.assertEqual(imported_api["assertion_profile_key"], profile_key)
+                self.assertEqual(imported_api["success_assertion_key"], assertion_key)
 
     def test_gateway_module_config_infers_local_gateway_address(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -614,9 +649,9 @@ spring:
             config = {
                 "variables": {"base_url": "127.0.0.1:9764"},
                 "success_assertions": {
-                    "default_profile": {
-                        "http": "review:http-success",
-                        "ws": "review:ws-success",
+                    "default_assertion": {
+                        "http": "review:http-status",
+                        "ws": "review:ws-message",
                     },
                     "definitions": [
                         {
@@ -638,22 +673,6 @@ spring:
                             "default_params": {},
                             "severity": "success",
                             "message": "未收到消息",
-                        },
-                    ],
-                    "profiles": [
-                        {
-                            "name": "review:http-success",
-                            "protocol": "http",
-                            "description": "审核中的 HTTP 默认成功集合。",
-                            "is_default": False,
-                            "bindings": [{"assertion_id": "review:http-status", "enabled": True}],
-                        },
-                        {
-                            "name": "review:ws-success",
-                            "protocol": "ws",
-                            "description": "审核中的 WS 默认成功集合。",
-                            "is_default": False,
-                            "bindings": [{"assertion_id": "review:ws-message", "enabled": True}],
                         },
                     ],
                 },
@@ -688,19 +707,16 @@ spring:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(manifest["success_assertions"]["source"], "project_config")
             self.assertEqual(
-                {item["assertion_profile_key"] for item in manifest["interfaces"]["http"]},
-                {"review:http-success"},
+                {item["success_assertion_key"] for item in manifest["interfaces"]["http"]},
+                {"review:http-status"},
             )
             self.assertEqual(
-                {item["assertion_profile_key"] for item in manifest["interfaces"]["ws"]},
-                {"review:ws-success"},
+                {item["success_assertion_key"] for item in manifest["interfaces"]["ws"]},
+                {"review:ws-message"},
             )
             self.assertEqual(
                 {item["key"] for item in manifest["assertion_definitions"]},
                 {"review:http-status", "review:ws-message"},
-            )
-            self.assertTrue(
-                all(item["is_default"] for item in manifest["assertion_profiles"])
             )
 
             archive_path = root / "qa-platform-import.zip"
@@ -711,15 +727,15 @@ spring:
                 text=True,
             )
             with zipfile.ZipFile(archive_path) as archive:
-                profiles = json.loads(archive.read("assertion_profiles.json"))
+                archive_names = archive.namelist()
                 apis = json.loads(archive.read("v1.0.0/api.json"))
-            self.assertEqual({item["name"] for item in profiles}, {"review:http-success", "review:ws-success"})
+            self.assertNotIn("assertion_profiles.json", archive_names)
             self.assertEqual(
-                {item["assertion_profile_key"] for item in apis},
-                {"review:http-success", "review:ws-success"},
+                {item["success_assertion_key"] for item in apis},
+                {"review:http-status", "review:ws-message"},
             )
 
-    def test_invalid_configured_success_profile_is_rejected(self) -> None:
+    def test_invalid_configured_success_condition_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / ".qa-platform.json").write_text(
@@ -727,9 +743,8 @@ spring:
                     {
                         "variables": {"base_url": "127.0.0.1:9764"},
                         "success_assertions": {
-                            "default_profile": {"http": "missing:http-success"},
+                            "default_assertion": {"http": "missing:http-success"},
                             "definitions": [],
-                            "profiles": [],
                         },
                     }
                 ),
@@ -746,7 +761,7 @@ spring:
                 text=True,
             )
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("references unknown profile", result.stderr)
+        self.assertIn("references unknown condition", result.stderr)
 
     def test_java_doc_names_combine_controller_and_method_context(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -820,20 +835,13 @@ spring:
                 "variables": {"base_url": "127.0.0.1:9764"},
             },
             "assertion_definitions": [{"key": "success", "name": "success"}],
-            "assertion_profiles": [
-                {
-                    "name": "default:http",
-                    "protocol": "http",
-                    "bindings": [{"assertion_id": "success", "enabled": True}],
-                }
-            ],
             "interfaces": {
                 "http": [
                     {
                         "key": "demo.get",
                         "method": "GET",
                         "path": "/demo/{id}",
-                        "assertion_profile_key": "default:http",
+                        "success_assertion_key": "success",
                         "parameters": [
                             {"name": "id", "in": "path", "type": "string", "required": True, "description": "", "example": "id-1"},
                             {"name": "page", "in": "query", "type": "integer", "required": False, "description": "页码", "example": ""},

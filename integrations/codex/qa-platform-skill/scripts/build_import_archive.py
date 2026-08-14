@@ -12,6 +12,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+from module_bundle import ModuleBundleError, load_import_source, public_flow_documents
 from project_config import (
     normalize_package_version,
     normalize_project_base_url,
@@ -26,7 +27,10 @@ HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRA
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("manifest", help="Validated qa-platform-import JSON")
+    parser.add_argument(
+        "manifest",
+        help="Validated module bundle directory/index or legacy qa-platform-import JSON",
+    )
     parser.add_argument(
         "--output",
         default=None,
@@ -38,8 +42,8 @@ def parse_args() -> argparse.Namespace:
 
 def load_manifest(path: Path) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        value = load_import_source(path)
+    except (ModuleBundleError, OSError, json.JSONDecodeError) as exc:
         raise SystemExit(f"Unable to read manifest: {exc}") from None
     if not isinstance(value, dict):
         raise SystemExit("Manifest root must be an object")
@@ -78,6 +82,61 @@ def response_contract(interface: dict[str, Any], protocol: str) -> dict[str, Any
     return contract
 
 
+def _header_names(headers: dict[str, Any]) -> set[str]:
+    return {str(name).lower() for name in headers}
+
+
+def _request_from_interface(
+    interface: dict[str, Any], protocol: str, method: str, path: str, key: str
+) -> dict[str, Any]:
+    source_request = interface.get("request")
+    request = deepcopy(source_request) if isinstance(source_request, dict) else {}
+
+    if protocol == "http":
+        configured_method = request.get("method")
+        if configured_method and str(configured_method).upper() != method:
+            raise SystemExit(
+                f"HTTP API {key} method conflicts with request.method: "
+                f"{method} != {configured_method}"
+            )
+        configured_path = request.get("path")
+        if configured_path and not request.get("url") and str(configured_path) != path:
+            raise SystemExit(
+                f"HTTP API {key} path conflicts with request.path: "
+                f"{path} != {configured_path}"
+            )
+        request["method"] = method
+        if not request.get("url"):
+            request["path"] = path
+
+        headers = request.get("headers")
+        if headers is None:
+            headers = {}
+        if not isinstance(headers, dict):
+            raise SystemExit(f"HTTP API {key} request.headers must be an object")
+        request["headers"] = headers
+
+        request_schema = interface.get("request_schema")
+        accept = request_schema.get("accept") if isinstance(request_schema, dict) else None
+        if accept not in (None, ""):
+            if not isinstance(accept, str) or not accept.strip():
+                raise SystemExit(f"HTTP API {key} request_schema.accept must be a string")
+            if "accept" not in _header_names(headers):
+                headers["Accept"] = accept.strip()
+        if not request.get("url") and path.startswith(("http://", "https://")):
+            request["url"] = path
+            request.pop("path", None)
+        return request
+
+    configured_url = request.get("url")
+    if configured_url and str(configured_url) != str(interface.get("url") or interface.get("path") or ""):
+        raise SystemExit(f"WebSocket API {key} URL conflicts with request.url")
+    request.setdefault("url", str(interface.get("url") or interface.get("path") or ""))
+    if interface.get("messages") and "messages" not in request:
+        request["messages"] = deepcopy(interface["messages"])
+    return request
+
+
 def convert_interface(interface: dict[str, Any]) -> dict[str, Any]:
     protocol = str(interface.get("protocol") or "http").lower()
     key = str(interface["key"])
@@ -86,15 +145,18 @@ def convert_interface(interface: dict[str, Any]) -> dict[str, Any]:
         if method not in HTTP_METHODS:
             raise SystemExit(f"Unsupported HTTP method in {key}: {method}")
         path = str(interface.get("path") or "")
-        request: dict[str, Any] = {"method": method}
-        if path.startswith(("http://", "https://")):
-            request["url"] = path
-        else:
-            request["path"] = path
+        expected_key = f"http:{method}:{path}"
+        if key.startswith("http:") and key != expected_key:
+            raise SystemExit(f"HTTP API key must equal {expected_key}: {key}")
     else:
-        request = {"url": str(interface.get("url") or interface.get("path") or "")}
-        if interface.get("messages"):
-            request["messages"] = interface["messages"]
+        target = str(interface.get("url") or interface.get("path") or "")
+        expected_key = f"ws:{target}"
+        if key.startswith("ws:") and key != expected_key:
+            raise SystemExit(f"WebSocket API key must equal {expected_key}: {key}")
+        method = ""
+        path = target
+
+    request = _request_from_interface(interface, protocol, method, path, key)
 
     converted = {
         "id": key,
@@ -103,13 +165,26 @@ def convert_interface(interface: dict[str, Any]) -> dict[str, Any]:
         "protocol": protocol,
         "description": str(interface.get("description") or ""),
         "request": request,
+        "request_schema": (
+            deepcopy(interface.get("request_schema"))
+            if isinstance(interface.get("request_schema"), dict)
+            else {}
+        ),
+        "response_schema": (
+            deepcopy(interface.get("response_schema"))
+            if isinstance(interface.get("response_schema"), dict)
+            else {}
+        ),
         "parameters": interface.get("parameters") if isinstance(interface.get("parameters"), list) else [],
         "examples": [],
         "success_contract": response_contract(interface, protocol),
         "response_variants": [],
     }
-    if interface.get("assertion_profile_key"):
-        converted["assertion_profile_key"] = str(interface["assertion_profile_key"])
+    template_key = interface.get("template_key") or interface.get("template_name")
+    if template_key:
+        converted["template_key"] = str(template_key)
+    if interface.get("success_assertion_key"):
+        converted["success_assertion_key"] = str(interface["success_assertion_key"])
     return converted
 
 
@@ -198,9 +273,10 @@ def build_archive(manifest: dict[str, Any], output: Path, package_version: str |
     assertion_definitions = [
         item for item in manifest.get("assertion_definitions", []) if isinstance(item, dict)
     ]
-    assertion_profiles = [
-        item for item in manifest.get("assertion_profiles", []) if isinstance(item, dict)
+    api_templates = [
+        item for item in manifest.get("api_templates", []) if isinstance(item, dict)
     ]
+    flow_documents = public_flow_documents(manifest.get("flow_documents"))
     warnings = [str(item) for item in manifest.get("warnings", [])]
     if manifest.get("features"):
         warnings.append("features 作为扫描库存放在 inventory.json，导入中心当前仅应用 API、流程和计划")
@@ -241,8 +317,9 @@ def build_archive(manifest: dict[str, Any], output: Path, package_version: str |
             "ws": len(interfaces.get("ws", [])),
             "flows": len(flows),
             "test_plans": len(plans),
+            "api_templates": len(api_templates),
             "assertion_definitions": len(assertion_definitions),
-            "assertion_profiles": len(assertion_profiles),
+            "flow_documents": len(flow_documents.get("documents", [])),
         },
     }
     inventory = {
@@ -257,9 +334,10 @@ def build_archive(manifest: dict[str, Any], output: Path, package_version: str |
 
         write_json("manifest.json", root_manifest)
         write_json("project.json", project)
+        write_json("api_templates.json", api_templates)
         write_json("inventory.json", inventory)
+        write_json("flow_documents.json", flow_documents)
         write_json("assertion_definitions.json", assertion_definitions)
-        write_json("assertion_profiles.json", assertion_profiles)
         write_json(f"{directory}/api.json", api_records)
         write_json(f"{directory}/flow.json", flows)
         write_json(f"{directory}/plans.json", plans)
@@ -271,10 +349,12 @@ def main() -> int:
     validate_manifest(manifest_path)
     manifest = load_manifest(manifest_path)
     storage = normalize_storage(manifest.get("storage"))
+    source_directory = manifest_path if manifest_path.is_dir() else manifest_path.parent
     output = (
         Path(args.output).expanduser()
         if args.output
-        else manifest_path.parent / safe_filename(storage.get("archive_filename"), "qa-platform-import.zip")
+        else source_directory
+        / safe_filename(storage.get("archive_filename"), "qa-platform-import.zip")
     )
     if not output.is_absolute():
         output = Path.cwd() / output

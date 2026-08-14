@@ -16,8 +16,12 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.error import HTTPError, URLError
+from urllib.parse import urljoin, urlsplit
+from urllib.request import Request, urlopen
 
+from flow_documents import load_flow_documents
+from module_bundle import ModuleBundleError, load_import_source, write_module_bundle
 from parameter_protocol import (
     add_parameters,
     add_path_parameters,
@@ -27,7 +31,11 @@ from parameter_protocol import (
 )
 from project_config import (
     load_project_config,
+    normalize_api_templates,
+    normalize_flow_documents,
+    normalize_openapi_config,
     normalize_package_version,
+    normalize_project_metadata,
     normalize_project_variables,
     normalize_success_assertions,
     normalize_storage,
@@ -153,6 +161,14 @@ DEFAULT_API_DOCUMENT_NAMES = {
     "asyncapi.json",
     "asyncapi.yaml",
     "asyncapi.yml",
+}
+DISCOVERY_PRIORITIES = {
+    "inferred": 0,
+    "source": 1,
+    "documentation": 2,
+    "swagger": 3,
+    "openapi": 3,
+    "asyncapi": 3,
 }
 JAVA_TYPE_DECL_RE = re.compile(r"\b(?P<kind>class|record)\s+(?P<name>[A-Za-z_$][\w$]*)\b")
 JAVA_METHOD_DECL_RE = re.compile(
@@ -406,7 +422,7 @@ def discover_spring_context_paths(
 def resolve_spring_context_path(
     path: Path, candidates: list[dict[str, Any]]
 ) -> tuple[str | None, list[dict[str, Any]], list[str]]:
-    """Resolve the nearest module config, warning when profiles disagree."""
+    """Resolve the nearest module config, warning when candidates disagree."""
     matches = [candidate for candidate in candidates if _is_relative_to(path, candidate["scope"])]
     if not matches:
         return None, [], []
@@ -479,6 +495,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Manifest path; defaults to <storage.directory>/<version>/qa-platform-import.json",
     )
+    parser.add_argument(
+        "--modules-dir",
+        default=None,
+        help="Editable module bundle directory; defaults to the version bucket",
+    )
     parser.add_argument("--config", default=None, help="Project-local qa-platform config path")
     parser.add_argument("--language", default=None, help="Override generated asset language, for example zh-CN")
     parser.add_argument("--storage-dir", default=None, help="Override configured scan artifact directory")
@@ -494,13 +515,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--previous-manifest",
         default=None,
-        help="Previous scan manifest used to decide update vs new test version",
+        help="Previous module bundle directory/index or aggregate used for version decisions",
     )
     parser.add_argument(
         "--openapi",
         action="append",
         default=[],
         help="Additional local OpenAPI JSON/YAML document; may be repeated",
+    )
+    parser.add_argument(
+        "--openapi-url",
+        action="append",
+        default=[],
+        help="Explicit runtime OpenAPI/Swagger URL; may be repeated",
     )
     return parser.parse_args()
 
@@ -602,34 +629,30 @@ def ensure_interface(
         return None
     method = method.upper() if method else None
     key_path = path
-    identity = interface_key(protocol, method, key_path)
+    route_key = interface_key(protocol, method, key_path)
     bucket = interfaces[protocol]
-    item = next(
-        (candidate for candidate in bucket.values() if candidate.get("identity_key") == identity),
-        None,
-    )
+    item = bucket.get(route_key)
     if item is None:
-        candidate_key = business_key or derive_business_key(
+        candidate_business_key = business_key or derive_business_key(
             protocol, method, key_path, name=name, operation_id=operation_id
         )
-        used_keys = {str(candidate.get("key")) for candidate in bucket.values()}
-        unique_key = candidate_key
-        if unique_key in used_keys:
-            suffix = (method or "ws").lower()
-            unique_key = f"{candidate_key}:{suffix}"
-            counter = 2
-            while unique_key in used_keys:
-                unique_key = f"{candidate_key}:{suffix}:{counter}"
-                counter += 1
         normalized_name = str(name or "").strip()
         item = {
-            "key": unique_key,
-            "business_key": candidate_key,
-            "identity_key": identity,
+            # The public API contract uses the route identity as the only
+            # external key.  Keep the business grouping hint private so
+            # feature localization can still use operation/path semantics.
+            "key": route_key,
+            "_business_key": candidate_business_key,
             "protocol": protocol,
             "name": normalized_name or (f"{method} {path}" if method else path),
             "_name_source": "source" if normalized_name else "fallback",
+            "_name_priority": DISCOVERY_PRIORITIES.get(discovery_method, 1)
+            if normalized_name
+            else -1,
             "description": str(description or "").strip(),
+            "_description_priority": DISCOVERY_PRIORITIES.get(discovery_method, 1)
+            if str(description or "").strip()
+            else -1,
             "service": root.name,
             "parameters": [],
             "request_schema": {},
@@ -645,34 +668,28 @@ def ensure_interface(
             item.update({"method": method or "GET", "path": key_path})
         else:
             item.update({"url": key_path, "messages": []})
-        bucket[identity] = item
-    elif business_key and item.get("business_key") != business_key:
-        used_keys = {
-            str(candidate.get("key"))
-            for candidate in bucket.values()
-            if candidate is not item
-        }
-        unique_key = business_key
-        if unique_key in used_keys:
-            suffix = (method or "ws").lower()
-            unique_key = f"{business_key}:{suffix}"
-            counter = 2
-            while unique_key in used_keys:
-                unique_key = f"{business_key}:{suffix}:{counter}"
-                counter += 1
-        item["key"] = unique_key
-        item["business_key"] = business_key
+        bucket[route_key] = item
+    elif business_key:
+        # A later, higher-signal source may improve feature grouping, but it
+        # must not change the stable route key.
+        item["_business_key"] = business_key
     add_ref(item, ref)
     item["confidence"] = max(float(item.get("confidence", 0)), confidence)
-    if item.get("discovery_method") == "inferred" and discovery_method != "inferred":
+    incoming_priority = DISCOVERY_PRIORITIES.get(discovery_method, 1)
+    current_priority = DISCOVERY_PRIORITIES.get(str(item.get("discovery_method")), 1)
+    if incoming_priority > current_priority:
         item["discovery_method"] = discovery_method
     normalized_name = str(name or "").strip()
-    if normalized_name and item.get("_name_source") != "source":
+    if normalized_name and incoming_priority >= int(item.get("_name_priority", -1)):
         item["name"] = normalized_name
         item["_name_source"] = "source"
+        item["_name_priority"] = incoming_priority
     normalized_description = str(description or "").strip()
-    if normalized_description and not str(item.get("description") or "").strip():
+    if normalized_description and incoming_priority >= int(
+        item.get("_description_priority", -1)
+    ):
         item["description"] = normalized_description
+        item["_description_priority"] = incoming_priority
     # Every scanner source shares route placeholders.  Seed them here so a
     # framework route without richer metadata is still executable after a
     # reviewer supplies a value; richer OpenAPI/Spring facts merge below.
@@ -1746,7 +1763,138 @@ def _resolve_openapi_schema(
                 else item
                 for item in result[field]
             ]
+    if document.get("swagger"):
+        if result.get("type") == "file":
+            result["type"] = "string"
+            result.setdefault("format", "binary")
+        if result.get("exclusiveMinimum") is True and isinstance(
+            result.get("minimum"), (int, float)
+        ):
+            result["exclusiveMinimum"] = result.pop("minimum")
+        elif isinstance(result.get("exclusiveMinimum"), bool):
+            result.pop("exclusiveMinimum", None)
+        if result.get("exclusiveMaximum") is True and isinstance(
+            result.get("maximum"), (int, float)
+        ):
+            result["exclusiveMaximum"] = result.pop("maximum")
+        elif isinstance(result.get("exclusiveMaximum"), bool):
+            result.pop("exclusiveMaximum", None)
+    return _materialize_all_of(result)
+
+
+def _materialize_all_of(schema: dict[str, Any]) -> dict[str, Any]:
+    """Expose composed object fields for qa-platform's flat field editors."""
+    result = deepcopy(schema)
+    branches = result.get("allOf")
+    if not isinstance(branches, list):
+        return result
+    properties = (
+        deepcopy(result.get("properties"))
+        if isinstance(result.get("properties"), dict)
+        else {}
+    )
+    required = {
+        str(item)
+        for item in result.get("required", [])
+        if isinstance(item, str)
+    }
+    for branch in branches:
+        if not isinstance(branch, dict):
+            continue
+        branch = _materialize_all_of(branch)
+        if isinstance(branch.get("properties"), dict):
+            properties.update(deepcopy(branch["properties"]))
+        required.update(
+            str(item) for item in branch.get("required", []) if isinstance(item, str)
+        )
+        if not result.get("type") and branch.get("type"):
+            result["type"] = branch["type"]
+    if properties:
+        result["properties"] = properties
+        result.setdefault("type", "object")
+    if required:
+        result["required"] = sorted(required)
     return result
+
+
+def _apply_schema_example(schema: dict[str, Any], example: Any) -> dict[str, Any]:
+    """Carry media-level examples down to fields when schemas omit them."""
+    result = deepcopy(schema)
+    if example is None:
+        return result
+    result.setdefault("example", deepcopy(example))
+    properties = result.get("properties")
+    if isinstance(properties, dict) and isinstance(example, dict):
+        for name, value in example.items():
+            if name in properties and isinstance(properties[name], dict):
+                properties[name] = _apply_schema_example(properties[name], value)
+    if isinstance(result.get("items"), dict) and isinstance(example, list) and example:
+        result["items"] = _apply_schema_example(result["items"], example[0])
+    return result
+
+
+def _schema_detail_gaps(schema: dict[str, Any]) -> tuple[list[str], list[str]]:
+    missing_descriptions: list[str] = []
+    missing_examples: list[str] = []
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return missing_descriptions, missing_examples
+    for name, value in properties.items():
+        if not isinstance(value, dict):
+            continue
+        if not str(value.get("description") or "").strip():
+            missing_descriptions.append(str(name))
+        if "example" not in value and "default" not in value:
+            missing_examples.append(str(name))
+    return missing_descriptions, missing_examples
+
+
+def _enrich_schema_fields(
+    schema: dict[str, Any], language: str | None
+) -> dict[str, Any]:
+    """Add deterministic UI metadata without replacing documented values."""
+    result = deepcopy(schema)
+    properties = result.get("properties")
+    if isinstance(properties, dict):
+        for name, raw_property in list(properties.items()):
+            property_schema = raw_property if isinstance(raw_property, dict) else {}
+            enriched = _enrich_schema_fields(property_schema, language)
+            fallback = parameter_from_schema(
+                str(name), "body", enriched, language=language
+            )
+            if fallback:
+                enriched.setdefault("description", fallback["description"])
+                enriched.setdefault("example", deepcopy(fallback["example"]))
+            properties[name] = enriched
+    if isinstance(result.get("items"), dict):
+        result["items"] = _enrich_schema_fields(result["items"], language)
+    for keyword in ("allOf", "anyOf", "oneOf"):
+        if isinstance(result.get(keyword), list):
+            result[keyword] = [
+                _enrich_schema_fields(branch, language)
+                if isinstance(branch, dict)
+                else branch
+                for branch in result[keyword]
+            ]
+    return result
+
+
+def _warn_schema_gaps(
+    item: dict[str, Any], schema: dict[str, Any], label: str
+) -> None:
+    descriptions, examples = _schema_detail_gaps(schema)
+    if descriptions:
+        _add_item_warning(
+            item,
+            f"{label} schema fields lacked descriptions and received deterministic placeholders: "
+            + ", ".join(descriptions),
+        )
+    if examples:
+        _add_item_warning(
+            item,
+            f"{label} schema fields lacked examples and received deterministic placeholders: "
+            + ", ".join(examples),
+        )
 
 
 def _api_records(value: Any) -> list[dict[str, Any]]:
@@ -1768,6 +1916,63 @@ def _json_content(
     return None
 
 
+def _media_example(media: dict[str, Any]) -> Any:
+    if "example" in media:
+        return media["example"]
+    examples = media.get("examples")
+    if isinstance(examples, dict):
+        for value in examples.values():
+            if isinstance(value, dict) and "value" in value:
+                return value["value"]
+    return None
+
+
+def _preferred_json_type(value: Any) -> str | None:
+    if not isinstance(value, list):
+        return None
+    for item in value:
+        normalized = str(item).split(";", 1)[0].strip().lower()
+        if normalized == "application/json" or normalized.endswith("+json"):
+            return str(item)
+    return None
+
+
+def _set_request_body_schema(item: dict[str, Any], schema: dict[str, Any]) -> None:
+    current = item.get("request_schema")
+    accept = current.get("accept") if isinstance(current, dict) else None
+    item["request_schema"] = {"schema": deepcopy(schema)}
+    if isinstance(accept, str) and accept.strip():
+        item["request_schema"]["accept"] = accept.strip()
+
+
+def _set_accept(item: dict[str, Any], content_type: str | None) -> None:
+    if not isinstance(content_type, str) or not content_type.strip():
+        return
+    current = item.get("request_schema")
+    if isinstance(current, dict) and (
+        "schema" in current or "accept" in current
+    ):
+        request_schema = deepcopy(current)
+    else:
+        request_schema = {"schema": deepcopy(current)} if isinstance(current, dict) and current else {}
+    request_schema["accept"] = content_type.strip()
+    request_schema.setdefault("schema", {})
+    item["request_schema"] = request_schema
+
+
+def _set_request_content_type(item: dict[str, Any], content_type: str | None) -> None:
+    if not isinstance(content_type, str) or not content_type.strip():
+        return
+    request = item.get("request") if isinstance(item.get("request"), dict) else {}
+    request = deepcopy(request)
+    headers = request.get("headers") if isinstance(request.get("headers"), dict) else {}
+    headers = deepcopy(headers)
+    if "content-type" not in {str(name).lower() for name in headers}:
+        headers["Content-Type"] = content_type.strip()
+    request["headers"] = headers
+    item["request"] = request
+
+
 def _explicit_business_key(value: dict[str, Any]) -> str | None:
     candidate = value.get("x-business-key") or value.get("x_business_key")
     return str(candidate).strip() if isinstance(candidate, str) and candidate.strip() else None
@@ -1779,6 +1984,7 @@ def _add_openapi_parameters(
     raw_parameters: Any,
     warnings: list[str],
     language: str | None = "en",
+    request_content_type: str | None = None,
 ) -> None:
     collected: list[dict[str, Any]] = []
     for raw in _api_records(raw_parameters):
@@ -1788,7 +1994,10 @@ def _add_openapi_parameters(
             schema = _resolve_openapi_schema(document, parameter.get("schema"), warnings)
             if schema:
                 item.setdefault("source_request_schema", deepcopy(parameter.get("schema") or {}))
-                item["request_schema"] = schema
+                _warn_schema_gaps(item, schema, "Request")
+                schema = _enrich_schema_fields(schema, language)
+                _set_request_body_schema(item, schema)
+                _set_request_content_type(item, request_content_type)
                 collected.extend(parameters_from_object_schema(schema, language=language))
             else:
                 _add_item_warning(item, "Swagger body parameter has no readable JSON schema")
@@ -1800,11 +2009,25 @@ def _add_openapi_parameters(
             )
             continue
         schema = parameter.get("schema")
+        if not isinstance(schema, dict):
+            selected = _json_content(document, parameter.get("content"), warnings)
+            if selected:
+                schema = selected[1].get("schema")
         if isinstance(schema, dict):
             parameter["schema"] = _resolve_openapi_schema(document, schema, warnings)
+        documented_description = str(
+            parameter.get("description")
+            or (parameter.get("schema") or {}).get("description")
+            or ""
+        ).strip()
         normalized = normalize_openapi_parameter(parameter, language=language)
         if normalized:
             collected.append(normalized)
+            if not documented_description:
+                _add_item_warning(
+                    item,
+                    f"OpenAPI parameter {normalized['in']}:{normalized['name']} has no description; a deterministic placeholder was generated",
+                )
     add_parameters(item, collected)
 
 
@@ -1825,14 +2048,18 @@ def _add_openapi_request_body(
                 "Request body is not application/json and is not emitted as executable parameters",
             )
         return
-    _content_type, media = selected
+    content_type, media = selected
     raw_schema = media.get("schema")
     schema = _resolve_openapi_schema(document, raw_schema, warnings)
     if not schema:
         _add_item_warning(item, "JSON request body has no readable schema")
         return
     item["source_request_schema"] = deepcopy(raw_schema) if isinstance(raw_schema, dict) else {}
-    item["request_schema"] = schema
+    schema = _apply_schema_example(schema, _media_example(media))
+    _warn_schema_gaps(item, schema, "Request")
+    schema = _enrich_schema_fields(schema, language)
+    _set_request_body_schema(item, schema)
+    _set_request_content_type(item, content_type)
     body_parameters = parameters_from_object_schema(schema, language=language)
     if body_parameters:
         add_parameters(item, body_parameters)
@@ -1844,20 +2071,40 @@ def _add_openapi_request_body(
 
 
 def _response_schema_from_operation(
-    document: dict[str, Any], raw_responses: Any, warnings: list[str]
-) -> dict[str, Any]:
+    document: dict[str, Any],
+    raw_responses: Any,
+    warnings: list[str],
+    swagger_produces: Any = None,
+) -> tuple[str | None, dict[str, Any]]:
     if not isinstance(raw_responses, dict):
-        return {}
-    for status in sorted(raw_responses, key=str):
+        return _preferred_json_type(swagger_produces), {}
+    statuses = sorted(
+        raw_responses,
+        key=lambda value: (
+            0 if str(value).startswith("2") else 1,
+            str(value),
+        ),
+    )
+    for status in statuses:
         if not str(status).startswith(("2", "3")):
             continue
         response = _resolve_openapi_object(document, raw_responses[status], warnings)
         if isinstance(response.get("schema"), dict):  # Swagger 2
-            return _resolve_openapi_schema(document, response["schema"], warnings)
+            schema = _resolve_openapi_schema(document, response["schema"], warnings)
+            examples = response.get("examples")
+            content_type = _preferred_json_type(swagger_produces)
+            example = None
+            if isinstance(examples, dict):
+                if content_type and content_type in examples:
+                    example = examples[content_type]
+                elif examples:
+                    example = next(iter(examples.values()))
+            return content_type, _apply_schema_example(schema, example)
         selected = _json_content(document, response.get("content"), warnings)
-        if selected and isinstance(selected[1].get("schema"), dict):
-            return _resolve_openapi_schema(document, selected[1]["schema"], warnings)
-    return {}
+        if selected:
+            schema = _resolve_openapi_schema(document, selected[1].get("schema"), warnings)
+            return selected[0], _apply_schema_example(schema, _media_example(selected[1]))
+    return _preferred_json_type(swagger_produces), {}
 
 
 def load_openapi(
@@ -1866,28 +2113,44 @@ def load_openapi(
     interfaces: dict[str, dict[str, dict[str, Any]]],
     warnings: list[str],
     language: str | None = "en",
+    *,
+    document_override: dict[str, Any] | None = None,
+    source_name: str | None = None,
+    required: bool = False,
 ) -> None:
-    try:
-        if path.suffix.lower() in {".yaml", ".yml"}:
-            try:
-                import yaml  # type: ignore
-            except ImportError:
-                warnings.append(f"Skipped YAML OpenAPI without PyYAML: {path}")
-                return
-            document = yaml.safe_load(read_text(path))
-        else:
-            document = json.loads(read_text(path))
-    except (OSError, json.JSONDecodeError, ValueError) as exc:
-        warnings.append(f"Could not read OpenAPI document {path}: {exc}")
-        return
+    def reject_or_warn(message: str) -> None:
+        if required:
+            raise SystemExit(message)
+        warnings.append(message)
+
+    document: Any = document_override
+    if document is None:
+        try:
+            payload = path.read_bytes()
+        except OSError as exc:
+            reject_or_warn(f"Could not read OpenAPI document {path}: {exc}")
+            return
+        try:
+            document = _parse_openapi_payload(
+                payload,
+                str(path),
+                "application/yaml"
+                if path.suffix.lower() in {".yaml", ".yml"}
+                else "application/json",
+            )
+        except SystemExit as exc:
+            reject_or_warn(str(exc))
+            return
     if not isinstance(document, dict):
-        warnings.append(f"API document must be an object: {path}")
+        reject_or_warn(f"API document must be an object: {path}")
         return
-    ref = source_ref(path, root, 1)
+    ref = {"file": source_name, "line": 1} if source_name else source_ref(path, root, 1)
     if not isinstance(document.get("paths"), dict):
         channels = document.get("channels")
         if not isinstance(channels, dict):
-            warnings.append(f"Document has no OpenAPI paths or AsyncAPI channels: {path}")
+            reject_or_warn(
+                f"Document has no OpenAPI paths or AsyncAPI channels: {source_name or path}"
+            )
             return
         servers = document.get("servers")
         server_url = ""
@@ -1974,6 +2237,7 @@ def load_openapi(
                 continue
             operation = _resolve_openapi_object(document, raw_operation, warnings)
             explicit_business_key = _explicit_business_key(operation)
+            discovery_method = "swagger" if document.get("swagger") else "openapi"
             item = ensure_interface(
                 interfaces,
                 "http",
@@ -1982,34 +2246,221 @@ def load_openapi(
                 ref,
                 method=method.upper(),
                 name=operation.get("summary") or operation.get("operationId"),
+                description=operation.get("description") or path_item.get("description"),
                 operation_id=operation.get("operationId"),
                 business_key=explicit_business_key,
-                discovery_method="openapi",
+                discovery_method=discovery_method,
                 confidence=0.98,
                 language=language,
             )
             if item is None:
                 continue
+            if not str(operation.get("summary") or "").strip():
+                _add_item_warning(
+                    item,
+                    "OpenAPI operation has no summary; operationId/path was used for the display name",
+                )
+            if not str(operation.get("description") or "").strip():
+                _add_item_warning(item, "OpenAPI operation has no description")
             item["operation_id"] = operation.get("operationId")
             tags = operation.get("tags") if isinstance(operation.get("tags"), list) else []
             item["tags"] = sorted(
                 set(item.get("tags", [])) | {str(tag) for tag in tags if isinstance(tag, str)}
             )
+            consumes = operation.get("consumes", document.get("consumes"))
+            request_content_type = _preferred_json_type(consumes)
             _add_openapi_parameters(
-                item, document, path_item.get("parameters"), warnings, language
+                item,
+                document,
+                path_item.get("parameters"),
+                warnings,
+                language,
+                request_content_type,
             )
             _add_openapi_parameters(
-                item, document, operation.get("parameters"), warnings, language
+                item,
+                document,
+                operation.get("parameters"),
+                warnings,
+                language,
+                request_content_type,
             )
             _add_openapi_request_body(
                 item, document, operation.get("requestBody"), warnings, language
             )
-            response_schema = _response_schema_from_operation(
-                document, operation.get("responses"), warnings
+            response_content_type, response_schema = _response_schema_from_operation(
+                document,
+                operation.get("responses"),
+                warnings,
+                operation.get("produces", document.get("produces")),
             )
+            _set_accept(item, response_content_type)
             if response_schema:
-                item["response_schema"] = response_schema
-            item["auth"] = "required" if operation.get("security") or document.get("security") else "unknown"
+                _warn_schema_gaps(item, response_schema, "Response")
+                item["response_schema"] = _enrich_schema_fields(
+                    response_schema, language
+                )
+            elif isinstance(operation.get("responses"), dict) and any(
+                str(status).startswith("2") and str(status) != "204"
+                for status in operation["responses"]
+            ):
+                _add_item_warning(
+                    item, "OpenAPI success response has no readable JSON schema"
+                )
+            security = (
+                operation.get("security")
+                if "security" in operation
+                else document.get("security")
+            )
+            item["auth"] = "required" if security else "none" if security == [] else "unknown"
+
+
+def _parse_openapi_payload(payload: bytes, source: str, content_type: str = "") -> dict[str, Any]:
+    try:
+        text = payload.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise SystemExit(f"Unable to decode API document {source}: {exc}") from None
+    use_yaml = (
+        "yaml" in content_type.lower()
+        or source.lower().split("?", 1)[0].endswith((".yaml", ".yml"))
+        or not text.lstrip().startswith(("{", "["))
+    )
+    if use_yaml:
+        try:
+            import yaml  # type: ignore
+        except ImportError:
+            raise SystemExit(f"PyYAML is required to read API document {source}") from None
+        try:
+            value = yaml.safe_load(text)
+        except yaml.YAMLError as exc:
+            raise SystemExit(f"Unable to parse API document {source}: {exc}") from None
+    else:
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise SystemExit(f"Unable to parse API document {source}: {exc}") from None
+    if not isinstance(value, dict):
+        raise SystemExit(f"API document must be a JSON/YAML object: {source}")
+    return value
+
+
+def load_openapi_url(
+    url: str,
+    root: Path,
+    interfaces: dict[str, dict[str, dict[str, Any]]],
+    warnings: list[str],
+    language: str | None = "en",
+    *,
+    timeout_seconds: float = 3,
+    max_bytes: int = 10 * 1024 * 1024,
+    required: bool = False,
+) -> None:
+    parsed = urlsplit(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise SystemExit(f"OpenAPI URL must use http or https: {url}")
+    request = Request(
+        url,
+        headers={
+            "Accept": "application/json, application/yaml, application/x-yaml, text/yaml",
+            "User-Agent": "qa-platform-skill/1.0",
+        },
+    )
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310 - explicit config only
+            payload = response.read(max_bytes + 1)
+            content_type = str(response.headers.get("Content-Type") or "")
+    except (HTTPError, URLError, TimeoutError, OSError) as exc:
+        message = f"Could not fetch runtime OpenAPI document {url}: {exc}"
+        if required:
+            raise SystemExit(message) from None
+        warnings.append(message)
+        return
+    if len(payload) > max_bytes:
+        message = f"Runtime OpenAPI document exceeds {max_bytes} bytes: {url}"
+        if required:
+            raise SystemExit(message)
+        warnings.append(message)
+        return
+    try:
+        document = _parse_openapi_payload(payload, url, content_type)
+    except SystemExit as exc:
+        if required:
+            raise
+        warnings.append(str(exc))
+        return
+    path_name = Path(parsed.path).name or "openapi.json"
+    load_openapi(
+        Path(path_name),
+        root,
+        interfaces,
+        warnings,
+        language,
+        document_override=document,
+        source_name=url,
+        required=required,
+    )
+
+
+def detect_runtime_openapi_paths(files: list[Path]) -> list[str]:
+    """Map known framework evidence to conventional runtime document paths."""
+    paths: list[str] = []
+
+    def add(path: str) -> None:
+        if path not in paths:
+            paths.append(path)
+
+    for path in files:
+        if path.name not in BUILD_METADATA_NAMES and path.suffix.lower() not in {
+            ".py",
+            ".java",
+            ".kt",
+            ".js",
+            ".ts",
+        }:
+            continue
+        text = read_text(path)[:500_000].lower()
+        if "springdoc-openapi" in text or "org.springdoc" in text:
+            add("/v3/api-docs")
+        if "springfox" in text or "swagger2" in text:
+            add("/v2/api-docs")
+        if "fastapi" in text:
+            add("/openapi.json")
+        if "@nestjs/swagger" in text or "swaggerdocumentoptions" in text:
+            add("/api-json")
+        if "swaggo" in text or "swaggerfiles" in text:
+            add("/swagger/doc.json")
+    return paths
+
+
+def runtime_openapi_urls(
+    openapi_config: dict[str, Any],
+    project_variables: dict[str, Any],
+    files: list[Path],
+) -> list[dict[str, Any]]:
+    runtime = openapi_config.get("runtime_discovery", {})
+    if not isinstance(runtime, dict) or not runtime.get("enabled"):
+        return []
+    base_url = str(project_variables.get("base_url") or "").strip()
+    if not base_url:
+        raise SystemExit(
+            "qa-platform openapi.runtime_discovery requires variables.base_url"
+        )
+    scheme = str(runtime.get("scheme") or "http").lower()
+    if scheme not in {"http", "https"}:
+        raise SystemExit("qa-platform openapi.runtime_discovery.scheme must be http or https")
+    paths = runtime.get("paths") or detect_runtime_openapi_paths(files)
+    if not paths:
+        return []
+    base = f"{scheme}://{base_url}/"
+    return [
+        {
+            "url": urljoin(base, str(path).lstrip("/")),
+            "required": False,
+            "timeout_seconds": runtime.get("timeout_seconds", 3),
+            "max_bytes": runtime.get("max_bytes", 10 * 1024 * 1024),
+        }
+        for path in paths
+    ]
 
 
 def discover_files(root: Path, excluded_roots: tuple[Path, ...] = ()) -> list[Path]:
@@ -2210,7 +2661,7 @@ def add_inferred_features(
         for item in interfaces[protocol].values():
             path = str(item.get("path") or item.get("url") or "")
             interface_business_key = str(
-                item.get("business_key") or derive_business_key(protocol, item.get("method"), path)
+                item.get("_business_key") or derive_business_key(protocol, item.get("method"), path)
             )
             business_segments = [segment for segment in interface_business_key.split(".") if segment]
             if not business_segments:
@@ -2387,12 +2838,15 @@ def localize_assets(
         for protocol in ("http", "ws"):
             for item in interfaces[protocol].values():
                 item.pop("_name_source", None)
+                item.pop("_name_priority", None)
+                item.pop("_description_priority", None)
+                item.pop("_business_key", None)
         return
 
     interface_labels: dict[str, str] = {}
     for protocol in ("http", "ws"):
         for item in interfaces[protocol].values():
-            business_key = str(item.get("business_key") or item.get("key") or "")
+            business_key = str(item.get("_business_key") or item.get("key") or "")
             label = chinese_business_label(business_key, item.get("method"))
             original_name = str(item.get("name") or "").strip()
             generic_source_name = _is_generic_chinese_interface_name(original_name)
@@ -2410,6 +2864,9 @@ def localize_assets(
         for item in interfaces[protocol].values():
             interface_labels[str(item["key"])] = str(item.get("name") or "接口")
             item.pop("_name_source", None)
+            item.pop("_name_priority", None)
+            item.pop("_description_priority", None)
+            item.pop("_business_key", None)
 
     feature_labels: dict[str, str] = {}
     for feature in features.values():
@@ -2425,12 +2882,22 @@ def localize_assets(
         case["warnings"] = ["请求参数和鉴权信息仍需人工审核"]
 
     for flow in flows:
+        documented = flow.get("origin") == "documentation"
         feature_key = f"feature:{str(flow.get('key', '')).removeprefix('flow:')}"
         label = feature_labels.get(feature_key, chinese_business_label(str(flow.get("key") or "测试")))
-        flow["name"] = f"{label}测试流程"
-        flow["description"] = "由接口与功能分组生成的待审核测试流程。"
+        if not documented or not str(flow.get("name") or "").strip():
+            flow["name"] = f"{label}测试流程"
+        if not documented or not str(flow.get("description") or "").strip():
+            flow["description"] = (
+                "由项目测试流程文档生成的待审核测试流程。"
+                if documented
+                else "由接口与功能分组生成的待审核测试流程。"
+            )
         for step in flow.get("steps", []):
-            step["name"] = interface_labels.get(str(step.get("interface_key") or ""), "接口")
+            if not documented or not str(step.get("name") or "").strip():
+                step["name"] = interface_labels.get(
+                    str(step.get("interface_key") or ""), "接口"
+                )
 
     for plan in test_plans:
         version = str(plan.get("version") or "当前")
@@ -2438,11 +2905,93 @@ def localize_assets(
         plan["description"] = "按版本汇总测试流程和未被流程覆盖接口的待审核测试计划。"
 
 
+def _template_matches(interface: dict[str, Any], match: dict[str, Any]) -> bool:
+    if not match:
+        return False
+    protocol = str(interface.get("protocol") or "http").lower()
+    method = str(interface.get("method") or "").upper()
+    path = str(interface.get("path") or interface.get("url") or "")
+    key = str(interface.get("key") or "")
+    tags = {str(item) for item in interface.get("tags", []) if isinstance(item, str)}
+
+    if match.get("protocol") and str(match["protocol"]).lower() != protocol:
+        return False
+    methods = match.get("methods", match.get("method"))
+    if isinstance(methods, str):
+        methods = [methods]
+    if isinstance(methods, list) and method not in {str(item).upper() for item in methods}:
+        return False
+    keys = match.get("keys", match.get("key"))
+    if isinstance(keys, str):
+        keys = [keys]
+    if isinstance(keys, list) and key not in {str(item) for item in keys}:
+        return False
+    paths = match.get("paths", match.get("path"))
+    if isinstance(paths, str):
+        paths = [paths]
+    if isinstance(paths, list) and path not in {str(item) for item in paths}:
+        return False
+    prefix = match.get("path_prefix")
+    if prefix and not path.startswith(str(prefix)):
+        return False
+    regex = match.get("path_regex")
+    if regex:
+        try:
+            if re.search(str(regex), path) is None:
+                return False
+        except re.error as exc:
+            raise SystemExit(f"Invalid api_templates.match.path_regex {regex}: {exc}") from None
+    required_tags = match.get("tags")
+    if isinstance(required_tags, str):
+        required_tags = [required_tags]
+    if isinstance(required_tags, list) and not tags.intersection(str(item) for item in required_tags):
+        return False
+    return True
+
+
+def apply_api_template_bindings(
+    interfaces: dict[str, dict[str, dict[str, Any]]],
+    templates: list[dict[str, Any]],
+) -> None:
+    """Bind configured templates with deterministic match rules."""
+    for protocol in ("http", "ws"):
+        for interface in interfaces[protocol].values():
+            matches = [
+                template
+                for template in templates
+                if isinstance(template.get("match"), dict)
+                and _template_matches(interface, template["match"])
+            ]
+            if not matches:
+                continue
+            selected = matches[0]
+            interface["template_key"] = str(selected.get("key") or selected["name"])
+            if len(matches) > 1:
+                _add_item_warning(
+                    interface,
+                    "Multiple API templates matched; the first configured template was selected: "
+                    + ", ".join(str(item.get("key") or item["name"]) for item in matches),
+                )
+
+
+def finalize_http_request_schemas(
+    interfaces: dict[str, dict[str, dict[str, Any]]]
+) -> None:
+    """Normalize scanner-era raw schemas to the http-api/v1 wrapper."""
+    for item in interfaces["http"].values():
+        schema = item.get("request_schema")
+        if not isinstance(schema, dict):
+            item["request_schema"] = {}
+        elif schema and "schema" not in schema and "accept" not in schema:
+            item["request_schema"] = {"schema": deepcopy(schema)}
+
+
 def build_assets(
     interfaces: dict[str, dict[str, dict[str, Any]]],
     features: dict[str, dict[str, Any]],
     plan_version: str,
     project_key: str,
+    documented_flows: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     all_interfaces = sorted(
         [*interfaces["http"].values(), *interfaces["ws"].values()], key=lambda item: item["key"]
@@ -2467,10 +3016,17 @@ def build_assets(
             }
         )
 
-    flows: list[dict[str, Any]] = []
-    covered_interface_keys: set[str] = set()
+    flows: list[dict[str, Any]] = deepcopy(documented_flows or [])
+    covered_interface_keys: set[str] = {
+        str(step.get("interface_key"))
+        for flow in flows
+        for step in flow.get("steps", [])
+        if isinstance(step, dict) and step.get("interface_key")
+    }
     for feature in sorted(features.values(), key=lambda item: item["key"]):
-        related = sorted(set(feature.get("related_interfaces", [])))
+        related = sorted(
+            set(feature.get("related_interfaces", [])) - covered_interface_keys
+        )
         if not related:
             continue
         covered_interface_keys.update(related)
@@ -2571,9 +3127,9 @@ def _section_items(document: dict[str, Any], section: str) -> list[dict[str, Any
 
 def _keyed(items: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return {
-        str(item["key"]): item
+        str(item.get("key") or item.get("path")): item
         for item in items
-        if isinstance(item, dict) and item.get("key")
+        if isinstance(item, dict) and (item.get("key") or item.get("path"))
     }
 
 
@@ -2581,8 +3137,11 @@ def change_summary(previous: dict[str, Any], current: dict[str, Any]) -> dict[st
     sections = (
         "interfaces.http",
         "interfaces.ws",
+        "api_templates",
+        "assertion_definitions",
         "features",
         "test_cases",
+        "flow_documents.documents",
         "flows",
         "test_plans",
     )
@@ -2615,8 +3174,8 @@ def decide_import(
             "reason": "No previous manifest was supplied",
         }
     try:
-        previous = json.loads(Path(previous_path).expanduser().read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        previous = load_import_source(Path(previous_path))
+    except (ModuleBundleError, OSError, json.JSONDecodeError) as exc:
         raise SystemExit(f"Unable to read previous manifest: {exc}") from None
     if not isinstance(previous, dict):
         raise SystemExit("Previous manifest root must be an object")
@@ -2677,32 +3236,69 @@ def decide_import(
     }
 
 
+def _scan_output_paths(
+    args: argparse.Namespace,
+    root: Path,
+    storage: dict[str, Any],
+    package_version: str,
+) -> tuple[Path, Path, Path]:
+    default_manifest_path, default_archive_path = storage_paths(
+        root, storage, package_version
+    )
+    output_path = Path(args.output).expanduser() if args.output else default_manifest_path
+    if not output_path.is_absolute():
+        output_path = Path.cwd() / output_path
+    output_path = output_path.resolve()
+    if args.modules_dir:
+        modules_directory = Path(args.modules_dir).expanduser()
+        if not modules_directory.is_absolute():
+            modules_directory = root / modules_directory
+        modules_directory = modules_directory.resolve()
+    elif output_path == default_manifest_path.resolve():
+        modules_directory = output_path.parent
+    else:
+        modules_directory = output_path.parent / f"{output_path.stem}.modules"
+    return output_path, modules_directory, default_archive_path.resolve()
+
+
 def scan(args: argparse.Namespace) -> dict[str, Any]:
     root = Path(args.root).expanduser().resolve()
     if not root.is_dir():
         raise SystemExit(f"Project root is not a directory: {root}")
     config, config_path = load_project_config(root, args.config)
+    raw_project = config.get("project") if isinstance(config.get("project"), dict) else {}
+    project_metadata = normalize_project_metadata(config.get("project"))
     configured_success_assertions = normalize_success_assertions(
         config.get("success_assertions")
     )
+    api_templates = normalize_api_templates(config.get("api_templates"))
+    flow_document_config = normalize_flow_documents(config.get("flow_documents"))
+    openapi_config = normalize_openapi_config(config.get("openapi"))
+    configured_variables = config.get("variables")
+    if configured_variables is None and isinstance(raw_project, dict):
+        configured_variables = raw_project.get("variables")
     project_variables = normalize_project_variables(
-        config.get("variables"), require_base_url=config_path is not None
+        configured_variables, require_base_url=config_path is not None
     )
     version_info = resolve_package_version(root, config, args.plan_version)
     package_version = str(version_info["value"])
-    project_key = args.project_key or slug(root.name)
-    project_name = args.project_name or root.name
+    project_key = args.project_key or project_metadata.get("key") or slug(root.name)
+    project_name = args.project_name or project_metadata.get("name") or root.name
     storage = normalize_storage(args.storage_dir or config.get("storage"))
-    default_manifest_path, _default_archive_path = storage_paths(root, storage, package_version)
+    output_path, modules_directory, default_archive_path = _scan_output_paths(
+        args, root, storage, package_version
+    )
+    default_manifest_path = storage_paths(root, storage, package_version)[0]
     storage_base = (
         default_manifest_path.parent.parent
         if storage.get("versioned", True)
         else default_manifest_path.parent
     )
+    excluded_roots = tuple({storage_base.resolve(), modules_directory.resolve()})
     interfaces: dict[str, dict[str, dict[str, Any]]] = {"http": {}, "ws": {}}
     features: dict[str, dict[str, Any]] = {}
     warnings: list[str] = []
-    files = discover_files(root, (storage_base,))
+    files = discover_files(root, excluded_roots)
     language = resolve_language(root, config, files, args.language)
     router_prefixes = discover_router_prefixes(files)
     spring_context_candidates, spring_context_warnings = discover_spring_context_paths(root, files)
@@ -2739,55 +3335,152 @@ def scan(args: argparse.Namespace) -> dict[str, Any]:
             language=language["code"],
         )
         parse_frontend_routes(text, path, root, features)
-    for document in args.openapi:
-        path = Path(document).expanduser()
+
+    api_document_sources: list[dict[str, Any]] = []
+    local_sources = [
+        {"path": document, "required": True, "source": "cli"}
+        for document in args.openapi
+    ] + [
+        {**document, "source": "project_config"}
+        for document in openapi_config["documents"]
+    ]
+    explicit_documents: set[str] = set()
+    for configured_document in local_sources:
+        path = Path(str(configured_document["path"])).expanduser()
         if not path.is_absolute():
             path = root / path
-            load_openapi(path.resolve(), root, interfaces, warnings, language["code"])
-    explicit_documents: set[str] = set()
-    for document in args.openapi:
-        document_path = Path(document).expanduser()
-        if not document_path.is_absolute():
-            document_path = root / document_path
-        explicit_documents.add(str(document_path.resolve()))
-    for path in files:
-        if path.name.lower() in DEFAULT_API_DOCUMENT_NAMES and str(path.resolve()) not in explicit_documents:
-            load_openapi(path, root, interfaces, warnings, language["code"])
+        path = path.resolve()
+        explicit_documents.add(str(path))
+        if not path.is_file():
+            message = f"Configured OpenAPI document does not exist: {path}"
+            if configured_document.get("required", True):
+                raise SystemExit(message)
+            warnings.append(message)
+            continue
+        load_openapi(
+            path,
+            root,
+            interfaces,
+            warnings,
+            language["code"],
+            required=bool(configured_document.get("required", True)),
+        )
+        api_document_sources.append(
+            {
+                "kind": "file",
+                "value": _relative_source_path(path, root),
+                "source": configured_document["source"],
+            }
+        )
+    if openapi_config["auto_discover"]:
+        for path in files:
+            if (
+                path.name.lower() in DEFAULT_API_DOCUMENT_NAMES
+                and str(path.resolve()) not in explicit_documents
+            ):
+                load_openapi(path, root, interfaces, warnings, language["code"])
+                api_document_sources.append(
+                    {
+                        "kind": "file",
+                        "value": _relative_source_path(path, root),
+                        "source": "auto_discovery",
+                    }
+                )
+
+    runtime_sources = [
+        {"url": value, "required": True, "source": "cli"}
+        for value in args.openapi_url
+    ] + [
+        {**value, "source": "project_config"}
+        for value in openapi_config["urls"]
+    ] + [
+        {**value, "source": "framework_runtime_discovery"}
+        for value in runtime_openapi_urls(openapi_config, project_variables, files)
+    ]
+    seen_urls: set[str] = set()
+    runtime_defaults = openapi_config["runtime_discovery"]
+    for configured_url in runtime_sources:
+        url = str(configured_url["url"])
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        load_openapi_url(
+            url,
+            root,
+            interfaces,
+            warnings,
+            language["code"],
+            timeout_seconds=float(
+                configured_url.get(
+                    "timeout_seconds", runtime_defaults["timeout_seconds"]
+                )
+            ),
+            max_bytes=int(
+                configured_url.get("max_bytes", runtime_defaults["max_bytes"])
+            ),
+            required=bool(configured_url.get("required", False)),
+        )
+        api_document_sources.append(
+            {
+                "kind": "url",
+                "value": url,
+                "source": configured_url["source"],
+            }
+        )
+
+    finalize_http_request_schemas(interfaces)
+    apply_api_template_bindings(interfaces, api_templates)
     success_code_candidates, success_code_warnings = discover_success_code_values(root, files)
     warnings.extend(success_code_warnings)
     success_assertions = build_success_assertion_assets(
         interfaces, success_code_candidates, configured_success_assertions
     )
     add_inferred_features(interfaces, features)
+    interface_keys = {
+        str(item["key"])
+        for protocol in ("http", "ws")
+        for item in interfaces[protocol].values()
+    }
+    flow_document_context, documented_flows = load_flow_documents(
+        root, flow_document_config, interface_keys, warnings
+    )
     test_cases, flows, test_plans = build_assets(
-        interfaces, features, package_version, project_key
+        interfaces,
+        features,
+        package_version,
+        project_key,
+        documented_flows,
     )
     localize_assets(interfaces, features, test_cases, flows, test_plans, language)
     if not interfaces["http"] and not interfaces["ws"]:
         warnings.append("No HTTP or WebSocket interfaces were discovered")
-    output_path = (
-        Path(args.output).expanduser()
-        if args.output
-        else default_manifest_path
-    )
-    if not output_path.is_absolute():
-        output_path = Path.cwd() / output_path
-    output_path = output_path.resolve()
-    project_description = (
+    generated_project_description = (
         "由项目静态扫描生成的导入草稿，接口、流程和计划需人工审核。"
         if language["code"].lower().startswith("zh")
         else "Generated from static project scanning; review interfaces, flows, and plans before import."
+    )
+    storage_info = storage_metadata(root, storage, package_version)
+    storage_info.update(
+        {
+            "manifest_path": _relative_source_path(output_path, root),
+            "modules_directory": _relative_source_path(modules_directory, root),
+            "archive_path": _relative_source_path(
+                modules_directory / default_archive_path.name, root
+            ),
+        }
     )
     manifest = {
         "format": "qa-platform-import",
         "version": "1.0",
         "package_version": package_version,
         "language": language,
-        "storage": storage_metadata(root, storage, package_version),
+        "storage": storage_info,
         "project": {
             "key": project_key,
             "name": project_name,
-            "description": project_description,
+            "description": project_metadata.get(
+                "description", generated_project_description
+            ),
             "language": language["code"],
             "variables": project_variables,
         },
@@ -2798,21 +3491,23 @@ def scan(args: argparse.Namespace) -> dict[str, Any]:
             "scanned_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
             "file_count": len(files),
             "release_version": version_info,
+            "api_documents": api_document_sources,
         },
         "interfaces": {
             "http": sorted(interfaces["http"].values(), key=lambda item: item["key"]),
             "ws": sorted(interfaces["ws"].values(), key=lambda item: item["key"]),
         },
+        "api_templates": api_templates,
         "assertion_definitions": success_assertions["assertion_definitions"],
-        "assertion_profiles": success_assertions["assertion_profiles"],
         "success_assertions": {
             "source": success_assertions["source"],
             "detected_success_codes": success_assertions["detected_success_codes"],
-            "profile_keys": success_assertions["profile_keys"],
-            "default_profiles": success_assertions["default_profiles"],
+            "success_assertion_keys": success_assertions["success_assertion_keys"],
+            "default_assertions": success_assertions["default_assertions"],
         },
         "features": sorted(features.values(), key=lambda item: item["key"]),
         "test_cases": test_cases,
+        "flow_documents": flow_document_context,
         "flows": flows,
         "test_plans": test_plans,
         "architecture": detect_architecture(root, files),
@@ -2821,7 +3516,9 @@ def scan(args: argparse.Namespace) -> dict[str, Any]:
     if config_path:
         manifest["source"]["config_path"] = _relative_source_path(config_path, root)
     previous_manifest = args.previous_manifest
-    if not previous_manifest and output_path.is_file():
+    if not previous_manifest and (modules_directory / "manifest.json").is_file():
+        previous_manifest = str(modules_directory)
+    elif not previous_manifest and output_path.is_file():
         previous_manifest = str(output_path)
     manifest["import_decision"] = decide_import(
         manifest, previous_manifest, package_version
@@ -2844,17 +3541,13 @@ def main() -> int:
     manifest = scan(args)
     root = Path(args.root).expanduser().resolve()
     storage = normalize_storage(manifest.get("storage"))
-    output = (
-        Path(args.output).expanduser()
-        if args.output
-        else storage_paths(root, storage, str(manifest["package_version"]))[0]
+    output, modules_directory, _default_archive = _scan_output_paths(
+        args, root, storage, str(manifest["package_version"])
     )
-    if not output.is_absolute():
-        output = Path.cwd() / output
-    output = output.resolve()
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(json.dumps({"output": str(output), "http": len(manifest["interfaces"]["http"]), "ws": len(manifest["interfaces"]["ws"]), "features": len(manifest["features"]), "test_cases": len(manifest["test_cases"]), "flows": len(manifest["flows"]), "test_plans": len(manifest["test_plans"]), "warnings": len(manifest["warnings"])}, ensure_ascii=False))
+    bundle = write_module_bundle(
+        manifest, modules_directory, compatibility_path=output
+    )
+    print(json.dumps({"output": str(output), "modules": bundle["directory"], "module_manifest": bundle["manifest"], "http": len(manifest["interfaces"]["http"]), "ws": len(manifest["interfaces"]["ws"]), "api_templates": len(manifest["api_templates"]), "flow_documents": len(manifest["flow_documents"]["documents"]), "features": len(manifest["features"]), "test_cases": len(manifest["test_cases"]), "flows": len(manifest["flows"]), "test_plans": len(manifest["test_plans"]), "warnings": len(manifest["warnings"])}, ensure_ascii=False))
     return 0
 
 

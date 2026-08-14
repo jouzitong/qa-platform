@@ -39,7 +39,7 @@ SQLite (SQLAlchemy)
 
 ## Codex 扫描集成
 
-面向任意被测项目的 HTTP/WebSocket 静态扫描器已迁入本仓库，源码位于 [`integrations/codex/qa-platform-skill`](integrations/codex/qa-platform-skill)。它生成待审核的 `qa-platform-import` ZIP；平台只会在预览后由人工确认导入，不会因扫描或一键入口直接修改项目资产。
+面向任意被测项目的 HTTP/WebSocket 扫描器已迁入本仓库，源码位于 [`integrations/codex/qa-platform-skill`](integrations/codex/qa-platform-skill)。它优先稳定转换 OpenAPI/Swagger/AsyncAPI，读取项目流程说明，生成可独立维护的模块 JSON 并打包为待审核的 `qa-platform-import` ZIP；平台只会在预览后由人工确认导入，不会因扫描或一键入口直接修改项目资产。
 
 从本仓库安装或更新用户级 Codex Skill：
 

@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from module_bundle import ModuleBundleError, load_import_source
 from project_config import normalize_project_variables
 
 SECRET_RE = re.compile(
@@ -84,6 +85,38 @@ def validate_parameters(value: Any, path: str, errors: list[str]) -> None:
                 add_error(errors, f"{item_path}.items.type must be a supported parameter type")
 
 
+def validate_response_schema_fields(value: Any, path: str, errors: list[str]) -> None:
+    """Require reviewable metadata for every visible response field."""
+    if not isinstance(value, dict):
+        add_error(errors, f"{path} must be an object")
+        return
+    properties = value.get("properties")
+    if isinstance(properties, dict):
+        for name, field in properties.items():
+            field_path = f"{path}.properties.{name}"
+            if not isinstance(field, dict):
+                add_error(errors, f"{field_path} must be an object")
+                continue
+            if not isinstance(field.get("description"), str) or not field[
+                "description"
+            ].strip():
+                add_error(errors, f"{field_path}.description must be a non-empty string")
+            if "example" not in field:
+                add_error(errors, f"{field_path}.example is required")
+            validate_response_schema_fields(field, field_path, errors)
+    items = value.get("items")
+    if isinstance(items, dict):
+        validate_response_schema_fields(items, f"{path}.items", errors)
+    for keyword in ("allOf", "anyOf", "oneOf"):
+        branches = value.get(keyword)
+        if isinstance(branches, list):
+            for index, branch in enumerate(branches):
+                if isinstance(branch, dict):
+                    validate_response_schema_fields(
+                        branch, f"{path}.{keyword}[{index}]", errors
+                    )
+
+
 def walk_secrets(value: Any, path: str, findings: list[str]) -> None:
     if isinstance(value, str):
         if SECRET_RE.search(value):
@@ -96,10 +129,9 @@ def walk_secrets(value: Any, path: str, findings: list[str]) -> None:
             walk_secrets(child, f"{path}[{index}]", findings)
 
 
-def validate_assertion_assets(manifest: dict[str, Any], errors: list[str]) -> tuple[dict[str, str], dict[str, str]]:
-    """Validate imported assertion IDs and return profile protocol/default maps."""
+def validate_assertion_assets(manifest: dict[str, Any], errors: list[str]) -> set[str]:
+    """Validate imported success conditions and return their keys."""
     definitions = manifest.get("assertion_definitions", [])
-    profiles = manifest.get("assertion_profiles", [])
     definition_keys: set[str] = set()
     if not isinstance(definitions, list):
         add_error(errors, "assertion_definitions must be a list")
@@ -117,63 +149,60 @@ def validate_assertion_assets(manifest: dict[str, Any], errors: list[str]) -> tu
             add_error(errors, f"duplicate assertion definition key: {key}")
         definition_keys.add(key)
 
-    profile_protocols: dict[str, str] = {}
-    if not isinstance(profiles, list):
-        add_error(errors, "assertion_profiles must be a list")
-        profiles = []
-    for index, profile in enumerate(profiles):
-        path = f"assertion_profiles[{index}]"
-        if not isinstance(profile, dict):
-            add_error(errors, f"{path} must be an object")
-            continue
-        name = profile.get("name")
-        protocol = profile.get("protocol")
-        if not isinstance(name, str) or not name.strip():
-            add_error(errors, f"{path}.name must be a non-empty string")
-            continue
-        if protocol not in {"http", "ws"}:
-            add_error(errors, f"{path}.protocol must be http or ws")
-            continue
-        if name in profile_protocols:
-            add_error(errors, f"duplicate assertion profile name: {name}")
-        profile_protocols[name] = protocol
-        bindings = profile.get("bindings")
-        if not isinstance(bindings, list) or not bindings:
-            add_error(errors, f"{path}.bindings must be a non-empty list")
-            continue
-        for binding_index, binding in enumerate(bindings):
-            binding_path = f"{path}.bindings[{binding_index}]"
-            if not isinstance(binding, dict):
-                add_error(errors, f"{binding_path} must be an object")
-                continue
-            assertion_id = binding.get("assertion_id")
-            if not isinstance(assertion_id, str) or assertion_id not in definition_keys:
-                add_error(errors, f"{binding_path}.assertion_id references an unknown definition")
-            if "enabled" in binding and not isinstance(binding["enabled"], bool):
-                add_error(errors, f"{binding_path}.enabled must be boolean")
-
-    default_profiles: dict[str, str] = {}
     metadata = manifest.get("success_assertions")
     if metadata is not None:
         if not isinstance(metadata, dict):
             add_error(errors, "success_assertions must be an object when present")
         else:
-            raw_defaults = metadata.get("default_profiles", {})
+            raw_defaults = metadata.get("default_assertions", {})
             if not isinstance(raw_defaults, dict):
-                add_error(errors, "success_assertions.default_profiles must be an object")
+                add_error(errors, "success_assertions.default_assertions must be an object")
             else:
-                for protocol, name in raw_defaults.items():
+                for protocol, key in raw_defaults.items():
                     if protocol not in {"http", "ws"}:
-                        add_error(errors, "success_assertions.default_profiles supports only http and ws")
+                        add_error(errors, "success_assertions.default_assertions supports only http and ws")
                         continue
-                    if not isinstance(name, str) or profile_protocols.get(name) != protocol:
+                    if not isinstance(key, str) or key not in definition_keys:
                         add_error(
                             errors,
-                            f"success_assertions.default_profiles.{protocol} must reference a matching profile",
+                            f"success_assertions.default_assertions.{protocol} must reference a definition",
                         )
-                        continue
-                    default_profiles[protocol] = name
-    return profile_protocols, default_profiles
+    return definition_keys
+
+
+def validate_api_templates(manifest: dict[str, Any], errors: list[str]) -> set[str]:
+    templates = manifest.get("api_templates", [])
+    aliases: set[str] = set()
+    identities: set[str] = set()
+    if not isinstance(templates, list):
+        add_error(errors, "api_templates must be a list")
+        return aliases
+    for index, template in enumerate(templates):
+        path = f"api_templates[{index}]"
+        if not isinstance(template, dict):
+            add_error(errors, f"{path} must be an object")
+            continue
+        name = template.get("name")
+        if not isinstance(name, str) or not name.strip():
+            add_error(errors, f"{path}.name must be a non-empty string")
+            continue
+        if name in identities:
+            add_error(errors, f"duplicate API template name: {name}")
+        identities.add(name)
+        for candidate in (template.get("id"), template.get("key"), name):
+            if candidate not in (None, ""):
+                aliases.add(str(candidate))
+        if template.get("protocol", "http") not in {"http", "ws"}:
+            add_error(errors, f"{path}.protocol must be http or ws")
+        for field in ("request",):
+            if field in template and not isinstance(template[field], dict):
+                add_error(errors, f"{path}.{field} must be an object")
+        for field in ("parameters", "examples"):
+            if field in template and not isinstance(template[field], list):
+                add_error(errors, f"{path}.{field} must be a list")
+        if isinstance(template.get("parameters"), list):
+            validate_parameters(template["parameters"], f"{path}.parameters", errors)
+    return aliases
 
 
 def validate(manifest: Any) -> tuple[list[str], list[str]]:
@@ -232,9 +261,8 @@ def validate(manifest: Any) -> tuple[list[str], list[str]]:
             if not isinstance(decision.get("version"), str) or not decision["version"].strip():
                 add_error(errors, "import_decision.version must be a non-empty string")
 
-    assertion_profile_protocols, configured_default_profiles = validate_assertion_assets(
-        manifest, errors
-    )
+    assertion_definition_keys = validate_assertion_assets(manifest, errors)
+    api_template_aliases = validate_api_templates(manifest, errors)
 
     interfaces = manifest.get("interfaces")
     interface_keys: set[str] = set()
@@ -266,21 +294,51 @@ def validate(manifest: Any) -> tuple[list[str], list[str]]:
             else:
                 if not isinstance(item.get("url") or item.get("path"), str):
                     add_error(errors, f"{path} needs url or path")
-            profile_key = item.get("assertion_profile_key")
-            if not isinstance(profile_key, str) or not profile_key.strip():
-                add_error(errors, f"{path}.assertion_profile_key must be a non-empty string")
-            elif assertion_profile_protocols.get(profile_key) != protocol:
-                add_error(errors, f"{path}.assertion_profile_key must reference a matching profile")
-            elif (
-                configured_default_profiles.get(protocol)
-                and profile_key != configured_default_profiles[protocol]
-            ):
-                add_error(
-                    errors,
-                    f"{path}.assertion_profile_key must use configured default {configured_default_profiles[protocol]}",
+            request_schema = item.get("request_schema", {})
+            if not isinstance(request_schema, dict):
+                add_error(errors, f"{path}.request_schema must be an object")
+            else:
+                accept = request_schema.get("accept")
+                if accept is not None and (not isinstance(accept, str) or not accept.strip()):
+                    add_error(errors, f"{path}.request_schema.accept must be a non-empty string")
+                if "schema" in request_schema and not isinstance(
+                    request_schema["schema"], dict
+                ):
+                    add_error(errors, f"{path}.request_schema.schema must be an object")
+            response_schema = item.get("response_schema", {})
+            if not isinstance(response_schema, dict):
+                add_error(errors, f"{path}.response_schema must be an object")
+            elif response_schema:
+                validate_response_schema_fields(
+                    response_schema, f"{path}.response_schema", errors
                 )
+            assertion_key = item.get("success_assertion_key")
+            if not isinstance(assertion_key, str) or not assertion_key.strip():
+                add_error(errors, f"{path}.success_assertion_key must be a non-empty string")
+            elif assertion_key not in assertion_definition_keys:
+                add_error(errors, f"{path}.success_assertion_key must reference a definition")
+            template_key = item.get("template_key") or item.get("template_name")
+            if template_key not in (None, "") and str(template_key) not in api_template_aliases:
+                add_error(errors, f"{path}.template_key must reference an API template")
             validate_parameters(item.get("parameters", []), f"{path}.parameters", errors)
             check_source_refs(item.get("source_refs", []), f"{path}.source_refs", errors)
+
+    flow_documents = manifest.get("flow_documents")
+    if flow_documents is not None:
+        if not isinstance(flow_documents, dict):
+            add_error(errors, "flow_documents must be an object when present")
+        elif not isinstance(flow_documents.get("documents", []), list):
+            add_error(errors, "flow_documents.documents must be a list")
+        else:
+            for index, document in enumerate(flow_documents.get("documents", [])):
+                path = f"flow_documents.documents[{index}]"
+                if not isinstance(document, dict):
+                    add_error(errors, f"{path} must be an object")
+                    continue
+                if not isinstance(document.get("path"), str) or not document["path"].strip():
+                    add_error(errors, f"{path}.path must be a non-empty string")
+                if "required" in document and not isinstance(document["required"], bool):
+                    add_error(errors, f"{path}.required must be boolean")
 
     features = manifest.get("features", [])
     feature_keys: set[str] = set()
@@ -416,8 +474,8 @@ def validate(manifest: Any) -> tuple[list[str], list[str]]:
 def main() -> int:
     args = parse_args()
     try:
-        manifest = json.loads(Path(args.manifest).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        manifest = load_import_source(Path(args.manifest))
+    except (ModuleBundleError, OSError, json.JSONDecodeError) as exc:
         print(f"Unable to read manifest: {exc}", file=sys.stderr)
         return 2
     errors, warnings = validate(manifest)

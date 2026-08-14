@@ -29,9 +29,9 @@ DEFAULT_STORAGE = {
 }
 SUCCESS_ASSERTION_PROTOCOLS = ("http", "ws")
 DEFAULT_SUCCESS_ASSERTIONS: dict[str, Any] = {
-    "default_profile": {
-        "http": "config:http-success",
-        "ws": "config:ws-success",
+    "default_assertion": {
+        "http": "config:http-success-status",
+        "ws": "config:ws-success-messages",
     },
     "definitions": [
         {
@@ -53,22 +53,6 @@ DEFAULT_SUCCESS_ASSERTIONS: dict[str, Any] = {
             "default_params": {"minimum": 1},
             "severity": "success",
             "message": "WebSocket 未收到成功消息",
-        },
-    ],
-    "profiles": [
-        {
-            "name": "config:http-success",
-            "protocol": "http",
-            "description": "项目配置初始化的 HTTP 默认成功断言集合。可由 AI 或人工按响应契约补充断言。",
-            "is_default": True,
-            "bindings": [{"assertion_id": "config:http-success-status", "enabled": True}],
-        },
-        {
-            "name": "config:ws-success",
-            "protocol": "ws",
-            "description": "项目配置初始化的 WebSocket 默认成功断言集合。可由 AI 或人工按消息契约补充断言。",
-            "is_default": True,
-            "bindings": [{"assertion_id": "config:ws-success-messages", "enabled": True}],
         },
     ],
 }
@@ -278,45 +262,36 @@ def default_success_assertions() -> dict[str, Any]:
 
 
 def normalize_success_assertions(value: Any) -> dict[str, Any] | None:
-    """Validate project-configured assertion assets before a scan uses them.
-
-    A configured default is intentionally strict: every configured protocol
-    must point at a profile declared in the same non-secret config.  This
-    prevents a scanner run from quietly falling back to a different assertion
-    collection when a profile was renamed or an AI draft is incomplete.
-    """
+    """Validate project-configured success conditions."""
     if value is None:
         return None
     if not isinstance(value, dict):
         raise SystemExit("qa-platform success_assertions must be an object")
 
-    raw_defaults = value.get("default_profile")
+    raw_defaults = value.get("default_assertion")
     if isinstance(raw_defaults, str):
         raw_defaults = {"http": raw_defaults}
     if not isinstance(raw_defaults, dict) or not raw_defaults:
         raise SystemExit(
-            "qa-platform success_assertions.default_profile must map http and/or ws to a profile name"
+            "qa-platform success_assertions.default_assertion must map http and/or ws to a condition key"
         )
-    default_profiles: dict[str, str] = {}
-    for protocol, profile_name in raw_defaults.items():
+    default_assertions: dict[str, str] = {}
+    for protocol, assertion_key in raw_defaults.items():
         normalized_protocol = str(protocol).lower()
         if normalized_protocol not in SUCCESS_ASSERTION_PROTOCOLS:
             raise SystemExit(
-                "qa-platform success_assertions.default_profile supports only http and ws"
+                "qa-platform success_assertions.default_assertion supports only http and ws"
             )
-        normalized_name = str(profile_name or "").strip()
-        if not normalized_name:
+        normalized_key = str(assertion_key or "").strip()
+        if not normalized_key:
             raise SystemExit(
-                f"qa-platform success_assertions.default_profile.{normalized_protocol} must be a non-empty profile name"
+                f"qa-platform success_assertions.default_assertion.{normalized_protocol} must be a non-empty condition key"
             )
-        default_profiles[normalized_protocol] = normalized_name
+        default_assertions[normalized_protocol] = normalized_key
 
     raw_definitions = value.get("definitions", [])
-    raw_profiles = value.get("profiles", [])
     if not isinstance(raw_definitions, list):
         raise SystemExit("qa-platform success_assertions.definitions must be a list")
-    if not isinstance(raw_profiles, list):
-        raise SystemExit("qa-platform success_assertions.profiles must be a list")
 
     definitions: list[dict[str, Any]] = []
     definition_keys: set[str] = set()
@@ -350,72 +325,187 @@ def normalize_success_assertions(value: Any) -> dict[str, Any] | None:
         definition_keys.add(key)
         definitions.append(definition)
 
-    profiles: list[dict[str, Any]] = []
-    profile_names: set[str] = set()
-    for index, raw_profile in enumerate(raw_profiles):
-        if not isinstance(raw_profile, dict):
-            raise SystemExit(f"qa-platform success_assertions.profiles[{index}] must be an object")
-        profile = deepcopy(raw_profile)
-        name = str(profile.get("name") or "").strip()
-        protocol = str(profile.get("protocol") or "").lower()
-        bindings = profile.get("bindings")
-        if not name or protocol not in SUCCESS_ASSERTION_PROTOCOLS:
+    for protocol, assertion_key in default_assertions.items():
+        if assertion_key not in definition_keys:
             raise SystemExit(
-                f"qa-platform success_assertions.profiles[{index}] requires a name and http/ws protocol"
+                f"qa-platform success_assertions.default_assertion.{protocol} references unknown condition: {assertion_key}"
             )
-        if name in profile_names:
-            raise SystemExit(f"qa-platform success_assertions has duplicate profile name: {name}")
-        if not isinstance(bindings, list) or not bindings:
-            raise SystemExit(
-                f"qa-platform success_assertions.profiles[{index}].bindings must be a non-empty list"
-            )
-        normalized_bindings: list[dict[str, Any]] = []
-        for binding_index, raw_binding in enumerate(bindings):
-            if not isinstance(raw_binding, dict):
-                raise SystemExit(
-                    f"qa-platform success_assertions.profiles[{index}].bindings[{binding_index}] must be an object"
-                )
-            binding = deepcopy(raw_binding)
-            assertion_id = str(binding.get("assertion_id") or "").strip()
-            if assertion_id not in definition_keys:
-                raise SystemExit(
-                    f"qa-platform success_assertions profile {name} references unknown definition: {assertion_id or '<empty>'}"
-                )
-            if "enabled" in binding and not isinstance(binding["enabled"], bool):
-                raise SystemExit(
-                    f"qa-platform success_assertions.profiles[{index}].bindings[{binding_index}].enabled must be boolean"
-                )
-            binding["assertion_id"] = assertion_id
-            binding.setdefault("enabled", True)
-            normalized_bindings.append(binding)
-        profile["name"] = name
-        profile["protocol"] = protocol
-        profile["bindings"] = normalized_bindings
-        profile.setdefault("description", "")
-        profile.setdefault("is_default", False)
-        if not isinstance(profile["is_default"], bool):
-            raise SystemExit(f"qa-platform success_assertions.profiles[{index}].is_default must be boolean")
-        profile_names.add(name)
-        profiles.append(profile)
-
-    profiles_by_name = {profile["name"]: profile for profile in profiles}
-    for protocol, profile_name in default_profiles.items():
-        profile = profiles_by_name.get(profile_name)
-        if profile is None:
-            raise SystemExit(
-                f"qa-platform success_assertions.default_profile.{protocol} references unknown profile: {profile_name}"
-            )
-        if profile["protocol"] != protocol:
-            raise SystemExit(
-                f"qa-platform success_assertions.default_profile.{protocol} must reference a {protocol} profile"
-            )
-
-    for profile in profiles:
-        profile["is_default"] = default_profiles.get(profile["protocol"]) == profile["name"]
     return {
-        "default_profiles": default_profiles,
+        "default_assertions": default_assertions,
         "definitions": definitions,
-        "profiles": profiles,
+    }
+
+
+def normalize_project_metadata(value: Any) -> dict[str, str]:
+    """Normalize optional project identity and descriptive metadata."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise SystemExit("qa-platform project must be an object")
+    result: dict[str, str] = {}
+    for field in ("key", "name", "description"):
+        if field not in value:
+            continue
+        normalized = str(value.get(field) or "").strip()
+        if field in {"key", "name"} and not normalized:
+            raise SystemExit(f"qa-platform project.{field} must be a non-empty string")
+        result[field] = normalized
+    return result
+
+
+def normalize_api_templates(value: Any) -> list[dict[str, Any]]:
+    """Validate reusable API templates declared by the target project."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise SystemExit("qa-platform api_templates must be a list")
+    result: list[dict[str, Any]] = []
+    names: set[str] = set()
+    aliases: set[str] = set()
+    for index, raw in enumerate(value):
+        if not isinstance(raw, dict):
+            raise SystemExit(f"qa-platform api_templates[{index}] must be an object")
+        template = deepcopy(raw)
+        name = str(template.get("name") or "").strip()
+        if not name:
+            raise SystemExit(f"qa-platform api_templates[{index}].name is required")
+        if name in names or name in aliases:
+            raise SystemExit(f"qa-platform api_templates has duplicate name: {name}")
+        protocol = str(template.get("protocol") or "http").lower()
+        if protocol not in {"http", "ws"}:
+            raise SystemExit(
+                f"qa-platform api_templates[{index}].protocol must be http or ws"
+            )
+        key = str(template.get("key") or name).strip()
+        if not key:
+            raise SystemExit(f"qa-platform api_templates[{index}].key must be non-empty")
+        if key in aliases or (key in names and key != name):
+            raise SystemExit(f"qa-platform api_templates has duplicate key: {key}")
+        for field in ("request", "match"):
+            if field in template and not isinstance(template[field], dict):
+                raise SystemExit(
+                    f"qa-platform api_templates[{index}].{field} must be an object"
+                )
+        for field in ("parameters", "examples"):
+            if field in template and not isinstance(template[field], list):
+                raise SystemExit(
+                    f"qa-platform api_templates[{index}].{field} must be a list"
+                )
+        template["key"] = key
+        template["name"] = name
+        template["protocol"] = protocol
+        template.setdefault("description", "")
+        template.setdefault("request", {})
+        template.setdefault("parameters", [])
+        template.setdefault("examples", [])
+        names.add(name)
+        aliases.update({key, name})
+        result.append(template)
+    return result
+
+
+def normalize_flow_documents(value: Any) -> list[dict[str, Any]]:
+    """Normalize project documents that guide or define test flows."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise SystemExit("qa-platform flow_documents must be a list")
+    result: list[dict[str, Any]] = []
+    paths: set[str] = set()
+    for index, raw in enumerate(value):
+        document = {"path": raw} if isinstance(raw, str) else deepcopy(raw)
+        if not isinstance(document, dict):
+            raise SystemExit(f"qa-platform flow_documents[{index}] must be a path or object")
+        path = str(document.get("path") or "").strip()
+        if not path:
+            raise SystemExit(f"qa-platform flow_documents[{index}].path is required")
+        if path in paths:
+            raise SystemExit(f"qa-platform flow_documents has duplicate path: {path}")
+        document["path"] = path
+        document["required"] = bool(document.get("required", True))
+        document["format"] = str(document.get("format") or "auto").lower()
+        if document["format"] not in {
+            "auto",
+            "markdown",
+            "asciidoc",
+            "json",
+            "yaml",
+            "text",
+        }:
+            raise SystemExit(
+                f"qa-platform flow_documents[{index}].format is unsupported"
+            )
+        paths.add(path)
+        result.append(document)
+    return result
+
+
+def _normalize_openapi_source(raw: Any, field: str, index: int) -> dict[str, Any]:
+    source_key = "url" if field == "urls" else "path"
+    source = {source_key: raw} if isinstance(raw, str) else deepcopy(raw)
+    if not isinstance(source, dict):
+        raise SystemExit(f"qa-platform openapi.{field}[{index}] must be a string or object")
+    value = str(source.get(source_key) or "").strip()
+    if not value:
+        raise SystemExit(f"qa-platform openapi.{field}[{index}].{source_key} is required")
+    source[source_key] = value
+    source["required"] = bool(source.get("required", field == "documents"))
+    return source
+
+
+def normalize_openapi_config(value: Any) -> dict[str, Any]:
+    """Normalize deterministic local/runtime OpenAPI and Swagger sources."""
+    if value is None:
+        value = {}
+    if isinstance(value, list):
+        value = {"documents": value}
+    if not isinstance(value, dict):
+        raise SystemExit("qa-platform openapi must be an object")
+    documents = value.get("documents", [])
+    urls = value.get("urls", [])
+    if not isinstance(documents, list) or not isinstance(urls, list):
+        raise SystemExit("qa-platform openapi.documents and openapi.urls must be lists")
+    runtime = value.get("runtime_discovery", {})
+    if isinstance(runtime, bool):
+        runtime = {"enabled": runtime}
+    if not isinstance(runtime, dict):
+        raise SystemExit("qa-platform openapi.runtime_discovery must be an object or boolean")
+    paths = runtime.get("paths", [])
+    if not isinstance(paths, list):
+        raise SystemExit("qa-platform openapi.runtime_discovery.paths must be a list")
+    try:
+        timeout_seconds = float(runtime.get("timeout_seconds", 3))
+    except (TypeError, ValueError):
+        raise SystemExit(
+            "qa-platform openapi.runtime_discovery.timeout_seconds must be numeric"
+        ) from None
+    try:
+        max_bytes = int(runtime.get("max_bytes", 10 * 1024 * 1024))
+    except (TypeError, ValueError):
+        raise SystemExit(
+            "qa-platform openapi.runtime_discovery.max_bytes must be an integer"
+        ) from None
+    if timeout_seconds <= 0 or max_bytes <= 0:
+        raise SystemExit(
+            "qa-platform openapi runtime timeout_seconds and max_bytes must be positive"
+        )
+    return {
+        "documents": [
+            _normalize_openapi_source(item, "documents", index)
+            for index, item in enumerate(documents)
+        ],
+        "urls": [
+            _normalize_openapi_source(item, "urls", index)
+            for index, item in enumerate(urls)
+        ],
+        "auto_discover": bool(value.get("auto_discover", True)),
+        "runtime_discovery": {
+            "enabled": bool(runtime.get("enabled", False)),
+            "scheme": str(runtime.get("scheme") or "http").lower(),
+            "paths": [str(item).strip() for item in paths if str(item).strip()],
+            "timeout_seconds": timeout_seconds,
+            "max_bytes": max_bytes,
+        },
     }
 
 

@@ -1,17 +1,31 @@
 # Scanner rules
 
-The scanner is a read-only, standard-library heuristic scanner. It produces a reviewable interface inventory; it does not prove runtime reachability or business behavior.
+The scanner is read-only and deterministic. It uses the Python standard library plus optional PyYAML for YAML contracts. It produces a reviewable interface inventory; it does not prove runtime reachability or business behavior.
 
 ## Discovery order
 
 Prefer high-signal sources and retain the discovery method in every record:
 
-1. OpenAPI, Swagger, or AsyncAPI documents: `openapi`, `asyncapi`.
+1. OpenAPI, Swagger, or AsyncAPI documents: `openapi`, `swagger`, `asyncapi`.
 2. Explicit backend routes: `source`.
 3. Frontend router declarations and page metadata: `frontend-route`.
 4. Documentation and naming heuristics: `inferred`.
 
-Merge records by `identity_key`. Never discard a second source reference because the first source already found the same route. The route identity is `http:<METHOD>:<path>` for HTTP and `ws:<path-or-url>` for WebSocket; the imported `key` is a business-oriented key such as `user.auth.login`.
+Merge records by the normalized route key. Never discard a second source reference because the first source already found the same route. The route key is `http:<METHOD>:<path>` for HTTP and `ws:<path-or-url>` for WebSocket, and it is emitted as the interface `key`. Business labels are used only for feature grouping and display names.
+
+## Standard API document conversion
+
+Read sources in this order: CLI/configured local documents, automatically discovered conventional filenames, explicit configured runtime URLs, then optional framework runtime discovery. Runtime sources are read-only HTTP(S) requests and are used only when the user/config enables them.
+
+- Resolve local `$ref` for Path Items, operations, parameters, request bodies, responses, messages, and nested schemas. Keep warnings for external, missing, or cyclic references.
+- Merge Path Item parameters before Operation parameters so operation facts win by `(in, name)`.
+- Preserve `summary`, `description`, `operationId`, tags, security override, types, formats, required fields, enum, pattern, numeric/string/array constraints, defaults, and examples.
+- Flatten resolved `allOf` object properties/required names into the visible schema while retaining the composed schema, so qa-platform's request/response field editors do not lose inherited fields.
+- Map OpenAPI request JSON media type to request `Content-Type`. Map the selected successful response JSON media type (or Swagger `produces`) to `request_schema.accept`, which materializes as the HTTP `Accept` header.
+- Preserve request fields in `request_schema.schema`, response fields in `response_schema`, and executable request fields in `parameters`. Media-level object examples propagate to matching fields.
+- If a documented field lacks description/example, generate only a deterministic neutral placeholder and add an API warning. If a non-204 successful response has no readable JSON schema, keep it empty and warn rather than letting AI invent a response.
+
+`openapi.runtime_discovery` recognizes conventional paths only when matching framework evidence exists: Springdoc `/v3/api-docs`, Springfox `/v2/api-docs`, FastAPI `/openapi.json`, Nest Swagger `/api-json`, and Swaggo `/swagger/doc.json`. Projects with custom endpoints should configure `openapi.urls` or `runtime_discovery.paths` explicitly.
 
 ## Supported static patterns in the bundled scanner
 
@@ -39,11 +53,11 @@ Literal values are normalized as route prefixes and composed with class/method m
 
 ### Success assertion discovery
 
-Prefer a project-local `.qa-platform.json` `success_assertions` section. It declares `definitions`, `profiles`, and `default_profile.http` / `default_profile.ws`; the scanner imports those assets and assigns every discovered API the configured default profile for its protocol. The initialized starter configuration uses HTTP 2xx and one WebSocket message. An AI may generate or refine additional definitions/profiles from source facts, but they remain reviewable config rather than an inferred runtime truth.
+Prefer a project-local `.qa-platform.json` `success_assertions` section. It declares `definitions` and `default_assertion.http` / `default_assertion.ws`; the scanner imports those assets and assigns every discovered API one configured success condition. The initialized starter configuration uses HTTP 2xx and one WebSocket message. An AI may generate or refine additional definitions from source facts, but they remain reviewable config rather than an inferred runtime truth.
 
-Validate configured profile names, protocol matches, and binding definition keys before scanning. A missing or invalid configured profile fails the scan; it must not silently switch APIs to another collection. Projects without the section retain the legacy inferred system profile for compatibility. Literal application declarations such as `SUCCESS_CODE`, `CODE_SUCCESS`, `ResultCode.SUCCESS(0, ...)`, and `success-code` still provide source evidence for the inline compatibility `success_contract`; conflicting values remain unresolved with a warning. Do not infer a success assertion from a method named `success` or from runtime-only behavior.
+Validate configured success-condition keys and definition keys before scanning. A missing or invalid configured condition fails the scan; it must not silently switch APIs to another condition. Projects without the section retain the legacy inferred system condition for compatibility. Literal application declarations such as `SUCCESS_CODE`, `CODE_SUCCESS`, `ResultCode.SUCCESS(0, ...)`, and `success-code` still provide source evidence for the inline compatibility `success_contract`; conflicting values remain unresolved with a warning. Do not infer a success condition from a method named `success` or from runtime-only behavior.
 
-Each generated API carries `assertion_profile_key`, and the manifest/ZIP carries the referenced `assertion_definitions` and `assertion_profiles`. The inline `success_contract` remains for compatibility with older importers.
+Each generated API carries `success_assertion_key`, and the manifest/ZIP carries the referenced `assertion_definitions`. The inline `success_contract` remains for compatibility with older importers.
 
 ## API display names and descriptions
 
@@ -81,9 +95,9 @@ Architecture detection is static evidence aggregation:
 
 ## Safe scanning
 
-Skip `.git`, `.codegraph`, virtual environments, dependency directories, build output, coverage output, and binary files. Read source as UTF-8 with replacement for malformed bytes. Do not fetch arbitrary URLs or execute application code during static scanning.
+Skip `.git`, `.codegraph`, virtual environments, dependency directories, build output, coverage output, generated module directories, and binary files. Read source as UTF-8 with replacement for malformed bytes. Never execute application code. Fetch only CLI/configured HTTP(S) OpenAPI URLs or conventional paths explicitly enabled under the configured `variables.base_url`; cap response time and bytes. Do not crawl links or infer production hosts.
 
-If dynamic discovery is later added, require an explicit base URL and host allowlist, redact response secrets, and keep it separate from the deterministic source scan.
+Configured flow documents must remain inside the project root and are capped at 2 MiB each. Their full prose is copied only to the local module context; compatibility JSON and ZIP output strip it. Flow and API artifacts still pass secret scanning before packaging.
 
 ## Version decision
 
@@ -92,7 +106,7 @@ Resolve `package_version` before comparing manifests. Use an explicit `--plan-ve
 When `--previous-manifest` is provided, compare the current and previous assets by stable key:
 
 - `create`: no previous manifest or the project key changed.
-- `update`: the package version is unchanged and one or more interface, feature, case, flow, or plan records changed.
+- `update`: the package version is unchanged and one or more project, API template, success condition, interface, flow-document metadata, feature, case, flow, architecture, or plan records changed.
 - `new_version`: the package version changed; generated plan keys include the new version.
 - `unchanged`: no stable-key content changed.
 
@@ -102,6 +116,6 @@ This decision is explanatory metadata for preview and approval. It must not caus
 
 Use explicit feature metadata first. If unavailable, group related API routes by their first meaningful literal path segment and use frontend route paths as page features. Mark these groups as inferred and retain the contributing interface keys. Do not claim that a path group represents a complete business process.
 
-For each feature with related interfaces, generate one disabled draft flow. Then generate at most one disabled draft smoke plan for the whole project `package_version`: add every generated flow first, followed by direct API items only for interfaces that no generated flow covers. This keeps the plan scope complete without running the same interface both inside a flow and as a direct item. Sort interface keys only to make output reproducible; that order is not a verified business sequence. Features without related interfaces remain inventory only.
+Load structured project flow documents first. They may define exact step order but still remain disabled drafts until runtime values are reviewed. Mark their covered interface keys, then generate one disabled inferred flow for only the remaining interfaces of each feature. Generate at most one disabled draft smoke plan for the whole project `package_version`: add every documented/inferred flow first, followed by direct API items only for interfaces that no flow covers. This keeps the plan scope complete without running the same interface both inside a flow and as a direct item. Sort inferred interface keys only to make output reproducible; that order is not a verified business sequence. Features without related interfaces remain inventory only.
 
 Business keys prefer OpenAPI `operationId` or `x-business-key`, then derive from meaningful route segments after removing generic `api` and version prefixes. Use dot-separated segments and keep at most four. Resolve collisions deterministically with `:<method>` and numeric suffixes; never use display names alone as identities.

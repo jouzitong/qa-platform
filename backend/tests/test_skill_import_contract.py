@@ -24,8 +24,42 @@ def test_bundled_skill_archive_can_be_previewed_and_approved() -> None:
     with tempfile.TemporaryDirectory() as directory:
         source_root = Path(directory) / "source"
         source_root.mkdir()
+        docs = source_root / "docs"
+        docs.mkdir()
+        (docs / "test-flows.md").write_text(
+            """# Health smoke flow
+
+```qa-platform-flow
+{
+  "key": "flow:health-smoke",
+  "name": "Health smoke flow",
+  "steps": [
+    {"name": "Check health", "interface_key": "http:GET:/health"}
+  ]
+}
+```
+""",
+            encoding="utf-8",
+        )
         (source_root / ".qa-platform.json").write_text(
-            json.dumps({"variables": {"base_url": "127.0.0.1:9764"}}), encoding="utf-8"
+            json.dumps(
+                {
+                    "variables": {"base_url": "127.0.0.1:9764"},
+                    "api_templates": [
+                        {
+                            "key": "health-template",
+                            "name": "Health template",
+                            "protocol": "http",
+                            "request": {"headers": {"X-Health-Source": "skill"}},
+                            "parameters": [],
+                            "examples": [],
+                            "match": {"method": "GET", "path": "/health"},
+                        }
+                    ],
+                    "flow_documents": ["docs/test-flows.md"],
+                }
+            ),
+            encoding="utf-8",
         )
         (source_root / "app.py").write_text(
             """
@@ -40,6 +74,7 @@ def health():
             encoding="utf-8",
         )
         manifest = Path(directory) / "qa-platform-import.json"
+        modules = Path(directory) / "qa-platform-import.modules"
         archive = Path(directory) / "qa-platform-import.zip"
         subprocess.run(
             [
@@ -60,7 +95,7 @@ def health():
             text=True,
         )
         subprocess.run(
-            [sys.executable, str(BUILD_ARCHIVE), str(manifest), "--output", str(archive)],
+            [sys.executable, str(BUILD_ARCHIVE), str(modules), "--output", str(archive)],
             check=True,
             capture_output=True,
             text=True,
@@ -87,6 +122,14 @@ def health():
                 if item["name"] == project_key
             )
             apis = client.get(f"/api/v1/apis?project_id={project['id']}").json()
+            templates = client.get(
+                f"/api/v1/api-templates?project_id={project['id']}"
+            ).json()
+            flows = client.get(f"/api/v1/flows?project_id={project['id']}").json()
             assert [(item["protocol"], item["request"].get("path")) for item in apis] == [
                 ("http", "/health")
             ]
+            assert [item["name"] for item in templates] == ["Health template"]
+            assert apis[0]["template_id"] == templates[0]["id"]
+            assert [item["key"] for item in flows] == ["flow:health-smoke"]
+            assert flows[0]["steps"][0]["api_id"] == apis[0]["id"]

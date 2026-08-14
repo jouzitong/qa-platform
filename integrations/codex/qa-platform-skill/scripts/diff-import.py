@@ -8,11 +8,16 @@ import json
 from pathlib import Path
 from typing import Any
 
+from module_bundle import load_import_source
+
 SECTIONS = (
     "interfaces.http",
     "interfaces.ws",
+    "api_templates",
+    "assertion_definitions",
     "features",
     "test_cases",
+    "flow_documents.documents",
     "flows",
     "test_plans",
 )
@@ -34,7 +39,11 @@ def value_at(document: dict[str, Any], section: str) -> list[dict[str, Any]]:
 
 
 def keyed(items: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    return {str(item["key"]): item for item in items if isinstance(item, dict) and item.get("key")}
+    return {
+        str(item.get("key") or item.get("path")): item
+        for item in items
+        if isinstance(item, dict) and (item.get("key") or item.get("path"))
+    }
 
 
 def diff(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
@@ -56,8 +65,8 @@ def diff(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
 
 def main() -> int:
     args = parse_args()
-    old = json.loads(Path(args.old_manifest).read_text(encoding="utf-8"))
-    new = json.loads(Path(args.new_manifest).read_text(encoding="utf-8"))
+    old = load_import_source(Path(args.old_manifest))
+    new = load_import_source(Path(args.new_manifest))
     result = diff(old, new)
     if args.as_json:
         print(json.dumps(result, ensure_ascii=False, indent=2))

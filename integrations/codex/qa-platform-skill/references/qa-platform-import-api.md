@@ -16,7 +16,7 @@ POST /api/v1/imports/one-click?project_id=<optional>
 
 The external `one-click` endpoint is a convenient entry point for partners or workspace actions. Despite its name, it creates a `pending` session and still requires `/approve`; it is not an approval bypass.
 
-The Skill reads the project-local `.qa-platform.json` for project variables and service settings. Its top-level service `base_url` defaults to `http://localhost:8000`, API prefix `/api/v1`, and the `preview` endpoint when omitted. `variables.base_url` is required for a valid project package; ZIP construction itself uses the generated manifest and does not make network requests.
+The Skill reads the project-local `.qa-platform.json` for project metadata, reusable assets, flow/API-document sources, project variables, and service settings. Its top-level service `base_url` defaults to `http://localhost:8000`, API prefix `/api/v1`, and the `preview` endpoint when omitted. `variables.base_url` is required for a valid project package. ZIP construction itself uses the generated module directory and does not make network requests; only an explicitly configured/enabled OpenAPI runtime scan performs read-only HTTP(S) fetches before packaging.
 
 ## Request
 
@@ -38,9 +38,10 @@ The current backend enforces archive safety limits and accepts JSON files only. 
 ```text
 manifest.json
 project.json
+api_templates.json
 inventory.json
+flow_documents.json
 assertion_definitions.json
-assertion_profiles.json
 v1.0.0/
   api.json
   flow.json
@@ -51,10 +52,12 @@ The version directory may use the selected `package_version`. The importer recog
 
 - `manifest.json`: package version, source, architecture evidence, import decision, and warnings.
 - `project.json`: project name, description, and variables. `variables.base_url` is required and must be an `ip:port` value without `http://`; qa-platform adds the HTTP scheme when resolving it. An explicit gateway address may fill it only as a compatibility fallback.
+- `api_templates.json`: reusable API templates imported before APIs; API `template_key` references resolve against their key/name.
 - `inventory.json`: scanner-only `features` and `test_cases`; current qa-platform warns and skips these because it has no standalone models for them.
-- `assertion_definitions.json`: atomic success assertion definitions, including the system status/body/message rules.
-- `assertion_profiles.json`: protocol-specific success assertion profiles referenced by API `assertion_profile_key`.
-- `api.json`: HTTP and WebSocket API assets. API assets reference a success profile when available and retain `success_contract` as a compatibility fallback. The current platform also fills missing HTTP headers with `X-trade-id: {{ random.uuid(32) }}` and `Accept: application/json`.
+- `flow_documents.json`: configured source-document path, format, hash, size, usage, and structured flow keys. Source prose `content` is local AI context and is stripped before ZIP creation.
+- `assertion_definitions.json`: success condition definitions, including the system status/body/message rules.
+- APIs reference one success condition through `success_assertion_key`.
+- `api.json`: HTTP and WebSocket API assets. API assets reference one success condition when available and retain `success_contract` as a compatibility fallback. The current platform also fills missing HTTP headers with `X-trade-id: {{ random.uuid(32) }}` and `Accept: application/json`.
 - `flow.json`: flow assets whose steps reference API keys through `api_key`. Scanner-generated steps are disabled.
 - `plans.json`: versioned plan assets whose items reference APIs or flows through `target_key`. Scanner-generated items are disabled.
 
@@ -76,7 +79,7 @@ Approval:
 POST /api/v1/imports/{import_id}/approve
 ```
 
-Approval applies project, API templates, assertion definitions/profiles, APIs, flows, and test plans in a transaction. It resolves references before commit and marks the session `applied`; failures roll back and mark the session `failed`.
+Approval applies project, API templates, success conditions, APIs, flows, and test plans in a transaction. It resolves references before commit and marks the session `applied`; failures roll back and mark the session `failed`.
 
 Rejection:
 
@@ -95,6 +98,11 @@ The project-local configuration is non-secret JSON:
 ```json
 {
   "base_url": "http://localhost:8000",
+  "project": {
+    "key": "order-system",
+    "name": "Order System",
+    "description": "订单系统测试资产"
+  },
   "variables": {
     "base_url": "127.0.0.1:9764"
   },
@@ -113,6 +121,42 @@ The project-local configuration is non-secret JSON:
     "versioned": true,
     "manifest_filename": "qa-platform-import.json",
     "archive_filename": "qa-platform-import.zip"
+  },
+  "api_templates": [],
+  "success_assertions": {
+    "default_assertion": {
+      "http": "config:http-success-status",
+      "ws": "config:ws-success-messages"
+    },
+    "definitions": [
+      {
+        "key": "config:http-success-status",
+        "name": "默认 HTTP 成功状态码",
+        "engine": "expression",
+        "config": {"expression": "response.status_code >= 200 and response.status_code <= 299"}
+      },
+      {
+        "key": "config:ws-success-messages",
+        "name": "默认 WebSocket 成功消息",
+        "engine": "expression",
+        "config": {"expression": "len(response.messages) >= 1"}
+      }
+    ]
+  },
+  "flow_documents": [
+    {"path": "docs/test-flows.md", "required": true}
+  ],
+  "openapi": {
+    "documents": [{"path": "docs/openapi.json", "required": true}],
+    "urls": [],
+    "auto_discover": true,
+    "runtime_discovery": {
+      "enabled": false,
+      "scheme": "http",
+      "paths": [],
+      "timeout_seconds": 3,
+      "max_bytes": 10485760
+    }
   }
 }
 ```

@@ -2,6 +2,8 @@
 
 本协议定义扫描器如何把 OpenAPI、Swagger、Spring 等源码事实转换为 qa-platform 可执行的 `ApiDefinition.parameters`。它约束扫描 JSON 的 `interfaces.http[]` / `interfaces.ws[]`，并由 ZIP 构建器原样复制到 `<version>/api.json`。
 
+完整的 `http-api/v1` 可移植示例见 `../assets/http_api.json`。
+
 ## 运行时边界
 
 qa-platform 只执行四类扁平参数：
@@ -55,7 +57,29 @@ qa-platform 只执行四类扁平参数：
 
 同一参数的合并不得丢失必填约束、已有说明或更精确的非字符串类型。若来源冲突，保留高可信来源的值并在接口 `warnings` 中记录无法执行的协议差异；不要创建两个同位置同名称的参数。
 
-`request_schema` 保存可供审阅的请求 schema；OpenAPI 请求体同时保留 `source_request_schema` 以追踪原始引用。只有上面的参数对象才会参与 qa-platform 的调用表单和默认值注入。
+`request_schema` 使用 `http-api/v1` 包装结构：`schema` 保存可供审阅的请求 JSON Schema，`accept` 表示期望响应媒体类型，导入适配器会把它映射为实际请求头 `Accept`。OpenAPI 请求体媒体类型写入 `request.headers.Content-Type`，成功响应媒体类型写入 `request_schema.accept`。OpenAPI 请求体同时保留 `source_request_schema` 以追踪原始引用。只有上面的参数对象才会参与 qa-platform 的调用表单和默认值注入。
+
+```json
+{
+  "request_schema": {
+    "accept": "application/json",
+    "schema": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": {"type": "string", "description": "名称", "example": "示例名称"}
+      }
+    }
+  },
+  "response_schema": {
+    "type": "object",
+    "required": ["id"],
+    "properties": {
+      "id": {"type": "integer", "description": "资源 ID", "example": 1}
+    }
+  }
+}
+```
 
 ## 来源映射
 
@@ -67,7 +91,10 @@ qa-platform 只执行四类扁平参数：
 - Swagger 2 直接位于 Parameter Object 的 `type`、`format`、`items`、`default`、`enum` 等字段须归一为 schema。
 - OpenAPI `requestBody.content.application/json` 或 `application/*+json` 的顶层 `properties` 映射为 `body`。`required` 数组决定字段必填。
 - Swagger 2 `in: body` 使用同一 JSON 对象展开规则。`in: formData` 只生成警告，不作为 JSON `body` 参数。
-- 成功响应 schema 不构造请求参数；它进入 `response_schema`，供成功契约使用。
+- OpenAPI 请求媒体类型或 Swagger 2 `consumes` 生成 `Content-Type`；成功响应 JSON 媒体类型或 `produces` 生成 `request_schema.accept` / `Accept`。
+- 解析参数、请求体、响应及嵌套 schema 的本地 `$ref`，并把 `allOf` 继承字段展开到可视化编辑器可见的 `properties` / `required`。
+- 媒体级对象示例下沉到同名请求/响应字段。字段缺少说明或示例时生成中性的确定性占位，并在 API `warnings` 中明确记录；不由 AI 猜测业务含义。
+- 成功响应 schema 不构造请求参数；它完整进入 `response_schema`，保留字段说明、必填、示例、枚举和约束，供响应字段编辑器和成功条件使用。非 204 成功响应没有可读 JSON Schema 时必须警告。
 
 ### Spring Boot / Java
 
@@ -100,7 +127,7 @@ DTO 解析是静态、保守的：支持类、嵌套类和 record 的直接字�
 
 ## 校验与导入
 
-`validate-import.py` 会拒绝：非数组参数集、空名称、未知位置/类型、非布尔 `required`、非必填 Path 参数、空说明、缺失/空示例、重复 `(in, name)`，以及 Header 名字仅大小写不同的重复项。验证成功后，ZIP 构建器才将参数写入 API 实体；导入预览和人工审批仍是生效的前置条件。
+`validate-import.py` 会拒绝：非数组参数集、空名称、未知位置/类型、非布尔 `required`、非必填 Path 参数、空说明、缺失/空示例、重复 `(in, name)`、Header 名字仅大小写不同的重复项、非对象 `request_schema.schema` / `response_schema`，以及响应 Schema 中缺少非空说明或示例的可见字段。验证成功后，ZIP 构建器才将参数和请求/响应 Schema 写入 API 实体；导入预览和人工审批仍是生效的前置条件。
 
 ## 示例
 
