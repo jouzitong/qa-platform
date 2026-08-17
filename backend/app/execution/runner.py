@@ -55,16 +55,98 @@ def _effective_parameters(
     return list(parameters.values())
 
 
+def _parameter_children(parameter: dict[str, Any]) -> list[dict[str, Any]]:
+    children = parameter.get("children")
+    if not isinstance(children, list):
+        children = parameter.get("child_params")
+    if not isinstance(children, list):
+        return []
+    return [item for item in children if isinstance(item, dict)]
+
+
+def _parameter_nodes(
+    parameters: list[dict[str, Any]],
+    parent_path: tuple[str, ...] = (),
+    inherited_location: str = "query",
+) -> list[tuple[str, tuple[str, ...], dict[str, Any]]]:
+    nodes: list[tuple[str, tuple[str, ...], dict[str, Any]]] = []
+    for parameter in parameters:
+        name = str(parameter.get("name", "")).strip()
+        if not name:
+            continue
+        location = inherited_location if parent_path else str(parameter.get("in", "query"))
+        path = (*parent_path, name)
+        nodes.append((location, path, parameter))
+        if str(parameter.get("type", "string")) == "object":
+            nodes.extend(_parameter_nodes(_parameter_children(parameter), path, location))
+    return nodes
+
+
+def _lookup_parameter_value(
+    context: dict[str, Any], path: tuple[str, ...]
+) -> tuple[Any, bool]:
+    dotted = ".".join(path)
+    if dotted in context:
+        return context[dotted], True
+    current: Any = context
+    for part in path:
+        if not isinstance(current, dict) or part not in current:
+            return None, False
+        current = current[part]
+    return current, True
+
+
+def _has_nested_value(target: dict[str, Any], path: tuple[str, ...]) -> bool:
+    _, found = _lookup_parameter_value(target, path)
+    return found
+
+
+def _set_nested_value(
+    target: dict[str, Any],
+    path: tuple[str, ...],
+    value: Any,
+    *,
+    overwrite: bool,
+) -> None:
+    if not path:
+        return
+    current = target
+    for part in path[:-1]:
+        nested = current.get(part)
+        if not isinstance(nested, dict):
+            nested = {}
+            current[part] = nested
+        current = nested
+    if overwrite or path[-1] not in current:
+        current[path[-1]] = value
+
+
+def _expand_dotted_context(context: dict[str, Any]) -> None:
+    for key, value in list(context.items()):
+        if isinstance(key, str) and "." in key:
+            _set_nested_value(
+                context,
+                tuple(part for part in key.split(".") if part),
+                value,
+                overwrite=False,
+            )
+
+
 def _context_with_parameter_defaults(
     parameters: list[dict[str, Any]], context: dict[str, Any]
 ) -> dict[str, Any]:
-    enriched = dict(context)
-    for parameter in parameters:
-        name = str(parameter.get("name", "")).strip()
-        if not name or name in enriched or "default" not in parameter:
+    enriched = deep_merge({}, context)
+    _expand_dotted_context(enriched)
+    for _location, path, parameter in _parameter_nodes(parameters):
+        if _lookup_parameter_value(enriched, path)[1] or "default" not in parameter:
             continue
         default = render(parameter["default"], enriched)
-        enriched[name] = _coerce_parameter_value(default, parameter)
+        _set_nested_value(
+            enriched,
+            path,
+            _coerce_parameter_value(default, parameter),
+            overwrite=False,
+        )
     return enriched
 
 
@@ -76,18 +158,18 @@ def _apply_parameter_values(
     overwrite: bool,
 ) -> dict[str, Any]:
     result = dict(config)
-    for parameter in parameters:
-        location = str(parameter.get("in", "query"))
-        name = str(parameter.get("name", "")).strip()
-        if not name or name not in context:
+    for location, path, parameter in _parameter_nodes(parameters):
+        value, found = _lookup_parameter_value(context, path)
+        if not found:
             continue
-        value = _coerce_parameter_value(context[name], parameter)
+        value = _coerce_parameter_value(value, parameter)
         if location == "path":
             path_params = result.get("path_params")
             if not isinstance(path_params, dict):
                 path_params = {}
-            if overwrite or name not in path_params:
-                path_params[name] = value
+            path_name = path[-1]
+            if overwrite or path_name not in path_params:
+                path_params[path_name] = value
             result["path_params"] = path_params
             continue
         if location not in {"query", "header", "body"}:
@@ -96,16 +178,16 @@ def _apply_parameter_values(
             values = result.get("body")
             if not isinstance(values, dict):
                 values = {}
-            if overwrite or name not in values:
-                values[name] = value
+            if overwrite or not _has_nested_value(values, path):
+                _set_nested_value(values, path, value, overwrite=overwrite)
             result["body"] = values
             continue
         config_field = "headers" if location == "header" else location
         values = result.get(config_field)
         if not isinstance(values, dict):
             values = {}
-        if overwrite or name not in values:
-            values[name] = value
+        if overwrite or not _has_nested_value(values, path):
+            _set_nested_value(values, path, value, overwrite=overwrite)
         result[config_field] = values
     return result
 

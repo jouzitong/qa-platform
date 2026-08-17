@@ -40,8 +40,97 @@ def check_source_refs(value: Any, path: str, errors: list[str]) -> None:
             add_error(errors, f"{path}[{index}] must contain string file and integer line")
 
 
+def _validate_parameter(
+    parameter: dict[str, Any],
+    item_path: str,
+    errors: list[str],
+    *,
+    inherited_location: str | None = None,
+    identities: set[tuple[str, str]] | None = None,
+    sibling_names: set[str] | None = None,
+) -> None:
+    name = parameter.get("name")
+    if not isinstance(name, str) or not name.strip():
+        add_error(errors, f"{item_path}.name must be a non-empty string")
+        return
+
+    declared_location = parameter.get("in")
+    if inherited_location is None:
+        if declared_location not in PARAMETER_LOCATIONS:
+            add_error(errors, f"{item_path}.in must be one of {sorted(PARAMETER_LOCATIONS)}")
+            return
+        location = str(declared_location)
+    else:
+        location = inherited_location
+        if declared_location is not None and declared_location != inherited_location:
+            add_error(
+                errors,
+                f"{item_path}.in must inherit parent location {inherited_location}",
+            )
+
+    if sibling_names is not None:
+        if name in sibling_names:
+            add_error(errors, f"duplicate child parameter: {location}:{name}")
+        sibling_names.add(name)
+
+    parameter_type = parameter.get("type")
+    if parameter_type not in PARAMETER_TYPES:
+        add_error(errors, f"{item_path}.type must be one of {sorted(PARAMETER_TYPES)}")
+    if not isinstance(parameter.get("required"), bool):
+        add_error(errors, f"{item_path}.required must be boolean")
+    elif location == "path" and not parameter["required"]:
+        add_error(errors, f"{item_path}: path parameters must be required")
+    description = parameter.get("description")
+    if not isinstance(description, str) or not description.strip():
+        add_error(errors, f"{item_path}.description must be a non-empty string")
+    if "example" not in parameter:
+        add_error(errors, f"{item_path}.example is required")
+    elif parameter["example"] is None or (
+        isinstance(parameter["example"], str) and not parameter["example"].strip()
+    ):
+        add_error(errors, f"{item_path}.example must be populated")
+
+    if identities is not None:
+        identity = (location, name.lower() if location == "header" else name)
+        if identity in identities:
+            add_error(errors, f"duplicate parameter identity: {location}:{name}")
+        identities.add(identity)
+
+    if parameter_type == "array" and "items" in parameter:
+        items = parameter["items"]
+        if not isinstance(items, dict) or items.get("type") not in PARAMETER_TYPES:
+            add_error(errors, f"{item_path}.items.type must be a supported parameter type")
+
+    children = parameter.get("children")
+    if children is None and "child_params" in parameter:
+        # Accept the pre-children compatibility spelling on hand-authored
+        # imports, while all generated artifacts use ``children``.
+        children = parameter.get("child_params")
+    if children is None:
+        return
+    if parameter_type != "object":
+        add_error(errors, f"{item_path}.children is only valid for object parameters")
+        return
+    if not isinstance(children, list):
+        add_error(errors, f"{item_path}.children must be a list")
+        return
+    child_names: set[str] = set()
+    for child_index, child in enumerate(children):
+        child_path = f"{item_path}.children[{child_index}]"
+        if not isinstance(child, dict):
+            add_error(errors, f"{child_path} must be an object")
+            continue
+        _validate_parameter(
+            child,
+            child_path,
+            errors,
+            inherited_location=location,
+            sibling_names=child_names,
+        )
+
+
 def validate_parameters(value: Any, path: str, errors: list[str]) -> None:
-    """Validate qa-platform's flat, executable parameter model."""
+    """Validate executable parameters, including recursive object children."""
     if not isinstance(value, list):
         add_error(errors, f"{path} must be a list")
         return
@@ -51,38 +140,7 @@ def validate_parameters(value: Any, path: str, errors: list[str]) -> None:
         if not isinstance(parameter, dict):
             add_error(errors, f"{item_path} must be an object")
             continue
-        name = parameter.get("name")
-        location = parameter.get("in")
-        parameter_type = parameter.get("type")
-        if not isinstance(name, str) or not name.strip():
-            add_error(errors, f"{item_path}.name must be a non-empty string")
-            continue
-        if location not in PARAMETER_LOCATIONS:
-            add_error(errors, f"{item_path}.in must be one of {sorted(PARAMETER_LOCATIONS)}")
-            continue
-        if parameter_type not in PARAMETER_TYPES:
-            add_error(errors, f"{item_path}.type must be one of {sorted(PARAMETER_TYPES)}")
-        if not isinstance(parameter.get("required"), bool):
-            add_error(errors, f"{item_path}.required must be boolean")
-        elif location == "path" and not parameter["required"]:
-            add_error(errors, f"{item_path}: path parameters must be required")
-        description = parameter.get("description")
-        if not isinstance(description, str) or not description.strip():
-            add_error(errors, f"{item_path}.description must be a non-empty string")
-        if "example" not in parameter:
-            add_error(errors, f"{item_path}.example is required")
-        elif parameter["example"] is None or (
-            isinstance(parameter["example"], str) and not parameter["example"].strip()
-        ):
-            add_error(errors, f"{item_path}.example must be populated")
-        identity = (str(location), name.lower() if location == "header" else name)
-        if identity in identities:
-            add_error(errors, f"duplicate parameter identity: {location}:{name}")
-        identities.add(identity)
-        if parameter_type == "array" and "items" in parameter:
-            items = parameter["items"]
-            if not isinstance(items, dict) or items.get("type") not in PARAMETER_TYPES:
-                add_error(errors, f"{item_path}.items.type must be a supported parameter type")
+        _validate_parameter(parameter, item_path, errors, identities=identities)
 
 
 def validate_response_schema_fields(value: Any, path: str, errors: list[str]) -> None:

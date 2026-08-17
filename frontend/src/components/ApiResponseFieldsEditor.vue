@@ -101,34 +101,42 @@ function fieldValue(field: JsonSchema, key: string) {
       </div>
       <el-button type="primary" plain :icon="Plus" @click="addField">添加字段</el-button>
     </div>
-    <div v-if="fields.length" class="response-field-list">
-      <article v-for="([name, field]) in fields" :key="name" class="response-field-card">
-        <div class="response-field-main">
-          <label class="response-field-control response-field-name">
+    <div v-if="fields.length" class="response-field-table" role="table" aria-label="响应字段列表">
+      <div class="response-field-table-head" role="row">
+        <span role="columnheader">字段名</span>
+        <span role="columnheader">类型</span>
+        <span role="columnheader">说明</span>
+        <span role="columnheader">示例</span>
+        <span role="columnheader">约束</span>
+        <span role="columnheader" aria-label="操作"></span>
+      </div>
+      <div class="response-field-list">
+        <article v-for="([name, field]) in fields" :key="name" class="response-field-card" role="row">
+          <label class="response-field-control response-field-name" role="cell">
             <span>字段名</span>
             <el-input :model-value="name" placeholder="例如：id" @update:model-value="setField(name, 'name', $event)" />
           </label>
-          <label class="response-field-control response-field-type">
+          <label class="response-field-control response-field-type" role="cell">
             <span>类型</span>
             <el-select :model-value="fieldValue((field || {}) as JsonSchema, 'type') || 'string'" @update:model-value="setField(name, 'type', $event)">
               <el-option v-for="type in ['string', 'integer', 'number', 'boolean', 'object', 'array']" :key="type" :label="type" :value="type" />
             </el-select>
           </label>
-          <label class="response-field-control response-field-example">
+          <label class="response-field-control response-field-description" role="cell">
+            <span>字段说明</span>
+            <el-input :model-value="fieldValue((field || {}) as JsonSchema, 'description')" placeholder="说明字段用途、格式或业务含义" @update:model-value="setField(name, 'description', $event)" />
+          </label>
+          <label class="response-field-control response-field-example" role="cell">
             <span>示例</span>
             <el-input :model-value="fieldValue((field || {}) as JsonSchema, 'example')" placeholder="示例值" @update:model-value="setField(name, 'example', $event)" />
           </label>
-          <label class="response-field-required">
+          <label class="response-field-required" role="cell">
             <span>约束</span>
             <el-checkbox :model-value="required.includes(name)" @update:model-value="setField(name, 'required', $event)">必填</el-checkbox>
           </label>
           <el-button text type="danger" :icon="Delete" aria-label="删除响应字段" @click="removeField(name)" />
-        </div>
-        <label class="response-field-control response-field-description">
-          <span>字段说明</span>
-          <el-input :model-value="fieldValue((field || {}) as JsonSchema, 'description')" placeholder="说明字段用途、格式或业务含义" @update:model-value="setField(name, 'description', $event)" />
-        </label>
-      </article>
+        </article>
+      </div>
     </div>
     <div v-else class="response-fields-empty">
       <strong>还没有响应字段</strong>

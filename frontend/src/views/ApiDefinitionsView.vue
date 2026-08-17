@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Delete, Edit, Search, VideoPlay } from '@element-plus/icons-vue'
+import { Delete, Edit, Plus, Search, VideoPlay } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, reactive, ref, watch } from 'vue'
 
@@ -18,6 +18,8 @@ const assertions = ref<AssertionDefinition[]>([])
 const { projectId } = useProjectContext()
 const activeTab = ref<'apis' | 'templates'>('apis')
 const dialog = ref(false)
+const requestPreviewOpen = ref(false)
+const editorConfigTab = ref<'request' | 'response'>('request')
 const editorMode = ref<'visual' | 'json'>('visual')
 const advancedDraft = ref('{}')
 const advancedError = ref('')
@@ -35,6 +37,7 @@ const executionResult = ref<object | null>(null)
 const executeAdvancedOpen = ref<string[]>([])
 const executeValues = reactive<Record<string, unknown>>({})
 const pathParameterNames = ref<string[]>([])
+const parameterEditor = ref<InstanceType<typeof ApiParametersEditor> | null>(null)
 const form = reactive({
   key: '', name: '', protocol: 'http' as 'http' | 'ws', template_id: null as string | null,
   success_assertion_id: undefined as string | null | undefined,
@@ -137,6 +140,11 @@ const routeKey = computed(() => {
   return target ? `ws:${target}` : ''
 })
 const displayKey = computed(() => routeKey.value || form.key)
+
+function addParameter() {
+  parameterEditor.value?.add()
+}
+
 function protocolScheme(protocol: 'http' | 'ws') {
   return protocol === 'ws' ? 'ws' : 'http'
 }
@@ -194,6 +202,10 @@ const requestTargetPreview = computed(() => {
   if (directUrl && !directUrl.startsWith('/')) return withProtocol(directUrl, form.protocol)
   return composeRequestEndpoint(request.base_url, path || directUrl, form.protocol)
 })
+const requestPreviewTemplate = computed(() => findTemplate(form.template_id))
+const requestPreviewText = computed(() => buildRequestPreview())
+const responsePreviewText = computed(() => buildResponsePreview())
+const requestPreviewTemplateText = computed(() => buildTemplatePreview())
 
 function updateRequestConfig(patch: Record<string, unknown>) {
   form.request = pretty({ ...requestConfig.value, ...patch })
@@ -233,6 +245,281 @@ function defaultRequest(protocol: 'http' | 'ws') {
 
 function defaultRequestSchema(protocol: 'http' | 'ws') {
   return protocol === 'http' ? { accept: 'application/json', schema: {} } : {}
+}
+
+function previewValue(value: unknown, fallback: string) {
+  if (value === undefined || value === null || value === '') return fallback
+  if (typeof value === 'object') return JSON.stringify(value)
+  return String(value)
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function parameterChildren(parameter: Record<string, unknown>): Record<string, unknown>[] {
+  const children = Array.isArray(parameter.children)
+    ? parameter.children
+    : parameter.child_params
+  return Array.isArray(children) ? children.filter(isRecord) : []
+}
+
+function previewParameters() {
+  const parameters = new Map<string, Record<string, unknown>>()
+  for (const item of [...(requestPreviewTemplate.value?.parameters || []), ...parameterItems.value]) {
+    const name = String(item.name || '').trim()
+    const location = String(item.in || 'query')
+    if (!name) continue
+    parameters.set(`${location}:${name}`, item)
+  }
+  return [...parameters.values()]
+}
+
+function previewParameterLiteral(parameter: Record<string, unknown>, value: unknown) {
+  const type = String(parameter.type || 'string')
+  if (['object', 'array'].includes(type) && typeof value === 'string') {
+    try { return JSON.parse(value) as unknown }
+    catch { return value }
+  }
+  return value
+}
+
+function previewParameterValue(parameter: Record<string, unknown>, parentPath: string[] = []): unknown {
+  const name = String(parameter.name || 'value').trim() || 'value'
+  const path = [...parentPath, name]
+  let explicitValue: unknown
+  if (Object.prototype.hasOwnProperty.call(parameter, 'default')
+    && parameter.default !== null && parameter.default !== undefined && parameter.default !== '')
+    explicitValue = previewParameterLiteral(parameter, parameter.default)
+  else if (Object.prototype.hasOwnProperty.call(parameter, 'example')
+    && parameter.example !== null && parameter.example !== undefined && parameter.example !== '')
+    explicitValue = previewParameterLiteral(parameter, parameter.example)
+
+  const children = parameterChildren(parameter)
+  if (String(parameter.type || 'string') === 'object' && children.length) {
+    let generatedValue: Record<string, unknown> = {}
+    for (const child of children) {
+      generatedValue = setPreviewParameterValue(
+        generatedValue,
+        [String(child.name || 'field')],
+        previewParameterValue(child, path),
+      )
+    }
+    if (isRecord(explicitValue)) return mergePreviewParameterValue(explicitValue, generatedValue)
+    if (explicitValue !== undefined) return explicitValue
+    return generatedValue
+  }
+  if (explicitValue !== undefined) return explicitValue
+  return `{{ ${path.join('.')} }}`
+}
+
+function previewSchemaSample(schema: unknown): unknown {
+  if (!isRecord(schema)) return {}
+  if (Object.prototype.hasOwnProperty.call(schema, 'example')) return schema.example
+  if (Object.prototype.hasOwnProperty.call(schema, 'default')) return schema.default
+  if (Object.prototype.hasOwnProperty.call(schema, 'const')) return schema.const
+  if (Array.isArray(schema.enum) && schema.enum.length) return schema.enum[0]
+  if (Array.isArray(schema.oneOf) && schema.oneOf.length) return previewSchemaSample(schema.oneOf[0])
+  if (Array.isArray(schema.anyOf) && schema.anyOf.length) return previewSchemaSample(schema.anyOf[0])
+
+  const type = String(schema.type || '')
+  if (type === 'object' || isRecord(schema.properties)) {
+    const properties = isRecord(schema.properties) ? schema.properties : {}
+    return Object.fromEntries(Object.entries(properties).map(([name, value]) => (
+      [name, previewSchemaSample(value)]
+    )))
+  }
+  if (type === 'array') return [previewSchemaSample(schema.items)]
+  if (type === 'integer' || type === 'number') return 0
+  if (type === 'boolean') return false
+  if (type === 'null') return null
+  return ''
+}
+
+function previewRequestBodyValue() {
+  const request = mergeConfig(requestPreviewTemplate.value?.request || {}, requestConfig.value)
+  const bodyParameters = previewParameters().filter((parameter) => parameter.in === 'body')
+  if (bodyParameters.length) {
+    const configuredBody = request.body
+    if (configuredBody !== undefined && configuredBody !== null && configuredBody !== ''
+      && !isRecord(configuredBody)) return configuredBody
+
+    let body = isRecord(configuredBody) ? configuredBody : {}
+    for (const parameter of bodyParameters) {
+      body = setPreviewParameterValue(
+        body,
+        [String(parameter.name || 'value')],
+        previewParameterValue(parameter),
+      )
+    }
+    return body
+  }
+
+  if (Object.prototype.hasOwnProperty.call(request, 'body')
+    && request.body !== undefined && request.body !== null && request.body !== '') return request.body
+
+  const schema = requestSchemaConfig.value.schema
+  if (isRecord(schema) && Object.keys(schema).length) return previewSchemaSample(schema)
+  return undefined
+}
+
+function mergePreviewParameterValue(current: unknown, generated: unknown): unknown {
+  if (isRecord(current) && isRecord(generated)) {
+    const merged: Record<string, unknown> = { ...generated, ...current }
+    for (const key of Object.keys(generated)) {
+      if (Object.prototype.hasOwnProperty.call(current, key)) {
+        merged[key] = mergePreviewParameterValue(current[key], generated[key])
+      }
+    }
+    return merged
+  }
+  return current === undefined || current === null || current === '' ? generated : current
+}
+
+function setPreviewParameterValue(
+  target: Record<string, unknown>,
+  path: string[],
+  value: unknown,
+): Record<string, unknown> {
+  if (!path.length) return target
+  const [part, ...rest] = path
+  const next = { ...target }
+  if (!rest.length) {
+    next[part] = mergePreviewParameterValue(target[part], value)
+    return next
+  }
+  next[part] = setPreviewParameterValue(
+    isRecord(target[part]) ? target[part] : {},
+    rest,
+    value,
+  )
+  return next
+}
+
+function formatPreviewBody(value: unknown) {
+  if (value === undefined || value === null || value === '') return '(无请求体)'
+  return typeof value === 'string' ? value : pretty(value)
+}
+
+function parsePreviewJson(value: string) {
+  try { return JSON.parse(value) as unknown }
+  catch { return undefined }
+}
+
+function previewExpectedBody(examples: unknown) {
+  if (!Array.isArray(examples)) return undefined
+  for (const item of examples) {
+    if (!isRecord(item) || !isRecord(item.expected_response)) continue
+    const expected = item.expected_response
+    if (Object.prototype.hasOwnProperty.call(expected, 'body')) return expected.body
+    return expected
+  }
+  return undefined
+}
+
+function previewResponseBodyValue() {
+  const apiExampleBody = previewExpectedBody(parsePreviewJson(form.examples))
+  if (apiExampleBody !== undefined) return apiExampleBody
+
+  const templateExampleBody = previewExpectedBody(requestPreviewTemplate.value?.examples)
+  if (templateExampleBody !== undefined) return templateExampleBody
+
+  if (Object.keys(responseSchemaConfig.value).length) return previewSchemaSample(responseSchemaConfig.value)
+  return {}
+}
+
+function previewResponseStatusCode() {
+  const contract = parsePreviewJson(form.success_contract)
+  const statusCodes = isRecord(contract) && isRecord(contract.status_codes)
+    ? contract.status_codes
+    : {}
+  const min = Number(statusCodes.min)
+  return Number.isFinite(min) ? min : 200
+}
+
+function previewResponseReason(statusCode: number) {
+  return {
+    200: 'OK', 201: 'Created', 202: 'Accepted', 204: 'No Content',
+    400: 'Bad Request', 401: 'Unauthorized', 403: 'Forbidden',
+    404: 'Not Found', 409: 'Conflict', 422: 'Unprocessable Entity',
+    500: 'Internal Server Error',
+  }[statusCode] || 'OK'
+}
+
+function buildRequestPreview() {
+  const request = mergeConfig(requestPreviewTemplate.value?.request || {}, requestConfig.value)
+  const target = requestTargetPreview.value
+  const targetMatch = target.match(/^[a-z]+:\/\/([^/]+)(\/.*)?$/i)
+  const host = targetMatch?.[1] || '{{ base_url }}'
+  let path = targetMatch?.[2] || (target.startsWith('/') ? target : '/')
+  const query = request.query && typeof request.query === 'object' && !Array.isArray(request.query)
+    ? request.query as Record<string, unknown>
+    : {}
+  const queryPairs = Object.entries(query).map(([name, value]) => `${name}=${previewValue(value, `{{ ${name} }}`)}`)
+  const configuredQueryNames = new Set(Object.keys(query))
+  previewParameters()
+    .filter((item) => item.in === 'query' && String(item.name || '').trim())
+    .forEach((item) => {
+      const name = String(item.name)
+      if (configuredQueryNames.has(name)) return
+      queryPairs.push(`${name}=${previewParameterValue(item)}`)
+    })
+  const querySeparator = path.indexOf('?')
+  const basePath = querySeparator >= 0 ? path.slice(0, querySeparator) : path
+  const existingQuery = querySeparator >= 0 ? path.slice(querySeparator + 1) : ''
+  const queryString = [existingQuery, ...queryPairs].filter(Boolean).join('&')
+  path = `${basePath || '/'}${queryString ? `?${queryString}` : ''}`
+  const scheme = target.match(/^([a-z]+):\/\//i)?.[1] || protocolScheme(form.protocol)
+  const fullTarget = targetMatch
+    ? `${scheme}://${host}${path}`
+    : target.startsWith('/') ? `${scheme}://${host}${path}` : target
+
+  const headers = request.headers && typeof request.headers === 'object' && !Array.isArray(request.headers)
+    ? request.headers as Record<string, unknown>
+    : {}
+  const configuredHost = Object.entries(headers)
+    .find(([name]) => name.toLowerCase() === 'host')?.[1]
+  const headerLines = Object.entries(headers)
+    .filter(([name, value]) => name.toLowerCase() !== 'host'
+      && value !== undefined && value !== null && value !== '')
+    .map(([name, value]) => `${name}: ${previewValue(value, '')}`)
+  if (!Object.keys(headers).some((name) => name.toLowerCase() === 'accept'))
+    headerLines.push(`Accept: ${requestSchemaAccept.value || 'application/json'}`)
+
+  const bodyText = formatPreviewBody(previewRequestBodyValue())
+  const requestLine = form.protocol === 'http'
+    ? `${requestMethod.value} ${fullTarget}`
+    : `GET ${fullTarget}`
+  const lines = [requestLine, '', `Host: ${previewValue(configuredHost, host)}`, ...headerLines]
+  if (form.protocol === 'ws') lines.push('Connection: Upgrade', 'Upgrade: websocket')
+  if (bodyText !== '(无请求体)' && !Object.keys(headers).some((name) => name.toLowerCase() === 'content-type'))
+    lines.push('Content-Type: application/json')
+  lines.push('', bodyText)
+  return lines.join('\n')
+}
+
+function buildResponsePreview() {
+  const statusCode = previewResponseStatusCode()
+  const accept = requestSchemaAccept.value || 'application/json'
+  return [
+    `${statusCode} ${previewResponseReason(statusCode)}`,
+    `Content-Type: ${accept}`,
+    '',
+    formatPreviewBody(previewResponseBodyValue()),
+  ].join('\n')
+}
+
+function buildTemplatePreview() {
+  const template = requestPreviewTemplate.value
+  if (!template) return ''
+  return pretty({
+    name: template.name,
+    protocol: template.protocol,
+    description: template.description,
+    request: template.request,
+    parameters: template.parameters,
+    examples: template.examples,
+  })
 }
 
 function defaultSuccessContract(protocol: 'http' | 'ws') {
@@ -290,7 +577,31 @@ function effectiveParameters(definition: ApiDefinition) {
     if (!name || !parameterLocations.some((item) => item.value === location)) continue
     parameters.set(`${location}:${name}`, item)
   }
-  return [...parameters.values()]
+  return flattenParameterTree([...parameters.values()])
+}
+
+function flattenParameterTree(
+  parameters: Record<string, unknown>[],
+  parentPath: string[] = [],
+  inheritedLocation = 'query',
+): Record<string, unknown>[] {
+  const flattened: Record<string, unknown>[] = []
+  for (const parameter of parameters) {
+    const name = String(parameter.name || '').trim()
+    if (!name) continue
+    const path = [...parentPath, name]
+    const location = parentPath.length ? inheritedLocation : String(parameter.in || 'query')
+    flattened.push({
+      ...parameter,
+      in: location,
+      parameter_path: path,
+      parameter_depth: parentPath.length,
+    })
+    if (String(parameter.type || 'string') === 'object') {
+      flattened.push(...flattenParameterTree(parameterChildren(parameter), path, location))
+    }
+  }
+  return flattened
 }
 
 const executionParameterGroups = computed(() => {
@@ -306,7 +617,17 @@ const executionParameterCount = computed(() => executionParameterGroups.value
   .reduce((total, group) => total + group.parameters.length, 0))
 
 function parameterKey(parameter: Record<string, unknown>) {
-  return `${String(parameter.in || 'query')}:${String(parameter.name || '')}`
+  return `${String(parameter.in || 'query')}:${parameterPath(parameter).join('.')}`
+}
+
+function parameterPath(parameter: Record<string, unknown>) {
+  const path = parameter.parameter_path
+  if (Array.isArray(path) && path.length) return path.map((part) => String(part))
+  return [String(parameter.name || '')]
+}
+
+function parameterDisplayName(parameter: Record<string, unknown>) {
+  return parameterPath(parameter).join('.')
 }
 
 function hasParameterValue(parameter: Record<string, unknown>, field: string) {
@@ -369,15 +690,30 @@ function collectExecutionParameters() {
   for (const parameter of executing.value ? effectiveParameters(executing.value) : []) {
     const value = executionParameterValue(parameter)
     if (value === undefined) continue
+    let normalizedValue = value
     if (isComplexParameter(parameter) && typeof value === 'string') {
       try {
-        inputs[String(parameter.name)] = JSON.parse(value)
+        normalizedValue = JSON.parse(value)
       } catch {
-        throw new Error(`参数 ${String(parameter.name)} 必须是有效 JSON`)
+        throw new Error(`参数 ${parameterDisplayName(parameter)} 必须是有效 JSON`)
       }
-    } else inputs[String(parameter.name)] = value
+    }
+    setNestedParameterValue(inputs, parameterPath(parameter), normalizedValue)
   }
   return inputs
+}
+
+function setNestedParameterValue(target: Record<string, unknown>, path: string[], value: unknown) {
+  if (!path.length) return
+  let current = target
+  path.forEach((part, index) => {
+    if (index === path.length - 1) {
+      current[part] = value
+      return
+    }
+    if (!isRecord(current[part])) current[part] = {}
+    current = current[part] as Record<string, unknown>
+  })
 }
 
 function effectiveRequest(definition: ApiDefinition) {
@@ -432,6 +768,8 @@ function openCreate() {
   editingId.value = ''
   Object.assign(form, { key: '', name: '', protocol: 'http', template_id: null, success_assertion_id: undefined, description: '', request: pretty(defaultRequest('http')), request_schema: pretty(defaultRequestSchema('http')), response_schema: pretty(defaultResponseSchema('http')), parameters: '[]', examples: '[]', success_contract: pretty(defaultSuccessContract('http')), response_variants: '[]' })
   editorMode.value = 'visual'
+  editorConfigTab.value = 'request'
+  requestPreviewOpen.value = false
   advancedError.value = ''
   syncPathParameters(parsePathParameterNames(requestAddress.value))
   dialog.value = true
@@ -441,6 +779,8 @@ function openEdit(row: ApiDefinition) {
   editingId.value = row.id
   Object.assign(form, { key: row.key, name: row.name, protocol: row.protocol, template_id: row.template_id, success_assertion_id: row.success_assertion_id, description: row.description, request: pretty(row.request), request_schema: pretty(requestSchemaFor(row)), response_schema: pretty(responseSchemaFor(row)), parameters: pretty(row.parameters), examples: pretty(row.examples), success_contract: pretty(Object.keys(row.success_contract || {}).length ? row.success_contract : defaultSuccessContract(row.protocol)), response_variants: pretty(row.response_variants) })
   editorMode.value = 'visual'
+  editorConfigTab.value = 'request'
+  requestPreviewOpen.value = false
   advancedError.value = ''
   syncPathParameters(parsePathParameterNames(requestAddress.value))
   dialog.value = true
@@ -539,6 +879,11 @@ function switchEditorMode(value: 'visual' | 'json') {
     return
   }
   if (applyAdvancedDraft()) editorMode.value = value
+}
+
+function openRequestPreview() {
+  if (editorMode.value === 'json' && !applyAdvancedDraft()) return
+  requestPreviewOpen.value = true
 }
 
 function updateResponseSchema(value: Record<string, unknown>) {
@@ -675,8 +1020,10 @@ async function execute() {
   if (!executing.value) return
   try {
     const missing = effectiveParameters(executing.value)
-      .filter((parameter) => Boolean(parameter.required) && executionParameterValue(parameter) === undefined)
-      .map((parameter) => String(parameter.name))
+      .filter((parameter) => Boolean(parameter.required)
+        && parameterChildren(parameter).length === 0
+        && executionParameterValue(parameter) === undefined)
+      .map((parameter) => parameterDisplayName(parameter))
     if (missing.length) {
       ElMessage.warning(`请填写必填参数：${missing.join('、')}`)
       return
@@ -794,12 +1141,26 @@ watch(apiSearch, () => { apiPage.value = 1 })
       <div class="api-advanced-heading">
         <div><strong>完整 API 配置</strong><p>一次编辑基础信息、请求配置、请求参数、响应字段和成功条件引用；切回可视化前会校验 JSON。</p></div>
       </div>
-      <el-input v-model="advancedDraft" class="json-input api-advanced-input" type="textarea" :rows="26" spellcheck="false" aria-label="完整 API JSON" />
+      <div class="api-code-editor api-advanced-code-editor">
+        <div class="api-code-editor-heading"><span>api-definition.json</span><span class="api-code-dots"><i></i><i></i><i></i></span></div>
+        <el-input v-model="advancedDraft" class="json-input api-advanced-input" type="textarea" :rows="26" spellcheck="false" aria-label="完整 API JSON" />
+      </div>
       <p v-if="advancedError" class="field-error">{{ advancedError }}</p>
       <p v-else class="api-advanced-hint">保存时仍会执行请求 Schema、响应 Schema、成功条件和协议一致性校验。</p>
     </div>
-    <el-form v-else label-position="top" class="api-editor-form api-editor-single-page">
-      <section class="api-editor-section api-editor-section-intro">
+    <div v-else class="api-editor-workspace">
+      <div class="api-request-head">
+        <div :class="['api-request-method', `is-${requestMethod.toLowerCase()}`]">{{ requestMethod }}</div>
+        <div class="api-request-endpoint">
+          <code>{{ requestTargetPreview }}</code>
+          <p>{{ form.name || '未命名 API' }} · {{ form.protocol === 'http' ? 'HTTP API' : 'WebSocket API' }}</p>
+        </div>
+        <div class="api-request-environment"><span class="api-environment-dot"></span> 当前项目</div>
+      </div>
+
+      <div class="api-editor-content">
+        <el-form label-position="top" class="api-editor-form api-editor-single-page api-editor-main">
+          <section class="api-editor-section api-editor-section-intro">
         <div class="api-section-heading"><span class="api-section-index">01</span><div><h3>接口信息</h3><p>定义 API 的稳定身份、请求目标，以及在文档中的基本描述。</p></div></div>
         <div class="api-basic-grid">
           <el-form-item label="API 名称" required><el-input v-model="form.name" placeholder="例如：查询用户订单" /></el-form-item>
@@ -826,65 +1187,114 @@ watch(apiSearch, () => { apiPage.value = 1 })
             <p v-if="inheritedRequestBase" class="request-target-hint">模板已提供基础地址，这里填写接口相对路径。</p>
           </el-form-item>
         </div>
-        <div class="endpoint-preview api-basic-endpoint-preview">
-          <span>最终请求目标</span><code>{{ requestMethod }} {{ requestTargetPreview }}</code>
-        </div>
-        <div v-if="pathParameterNames.length" class="path-param-hint api-basic-path-param-hint">
-          <strong>已识别 Path 参数</strong>
-          <el-tag v-for="name in pathParameterNames" :key="name" type="warning" effect="plain">{{ name }}</el-tag>
-          <span>运行时可通过流程上下文的同名变量渲染。</span>
-        </div>
         <el-form-item label="功能说明" class="api-description-field"><el-input v-model="form.description" type="textarea" :rows="1" placeholder="简要说明这个 API 做什么、适用于什么场景" /></el-form-item>
-      </section>
+          </section>
 
-      <div v-if="findTemplate(form.template_id)" class="inheritance-notice">
+          <div v-if="findTemplate(form.template_id)" class="inheritance-notice">
         <div><strong>已继承 {{ findTemplate(form.template_id)?.name }}</strong><span>基础地址、公共请求头和超时会自动合并，当前 API 只需填写差异。</span></div>
         <code>{{ displayRequestBase }}</code>
+          </div>
+
+          <el-tabs v-model="editorConfigTab" class="api-config-tabs" aria-label="API 配置模块">
+            <el-tab-pane label="请求配置" name="request">
+              <section class="api-editor-section api-editor-section-request">
+                <div class="api-section-heading api-section-heading-with-action">
+                  <span class="api-section-index">02</span>
+                  <div><h3>请求配置</h3><p>维护 Query、Header 和 Body 参数契约。</p></div>
+                  <el-button type="primary" plain size="small" :icon="Plus" @click="addParameter">添加参数</el-button>
+                </div>
+                <ApiRequestEditor
+                  v-if="form.protocol === 'ws'"
+                  v-model="form.request"
+                  :protocol="form.protocol"
+                />
+                <ApiParametersEditor ref="parameterEditor" v-model="parameterItems" :path-params="pathParameterNames" />
+              </section>
+            </el-tab-pane>
+
+            <el-tab-pane label="响应配置" name="response">
+              <section class="api-editor-section api-editor-section-response">
+                <div class="api-section-heading api-section-heading-with-meta"><span class="api-section-index">03</span><div><h3>响应配置</h3><p>配置响应媒体类型、成功条件和响应字段结构。</p></div></div>
+                <div class="response-config-meta">
+                  <el-form-item v-if="form.protocol === 'http'" label="响应媒体类型（Accept）" class="response-accept-field">
+                    <el-select
+                      v-model="requestSchemaAccept"
+                      class="response-accept-select"
+                      filterable
+                      allow-create
+                      clearable
+                      default-first-option
+                      popper-class="response-accept-popper"
+                      placeholder="选择或输入媒体类型"
+                    >
+                      <el-option v-for="option in commonAcceptOptions" :key="option.value" :label="option.value" :value="option.value">
+                        <span>{{ option.label }}</span><code>{{ option.value }}</code>
+                      </el-option>
+                    </el-select>
+                  </el-form-item>
+                  <el-form-item label="成功条件" class="response-success-assertion-field">
+                    <el-select v-model="form.success_assertion_id" clearable placeholder="选择一个成功条件">
+                      <el-option v-for="item in assertions" :key="item.id" :label="item.name" :value="item.id">
+                        <span>{{ item.name }}</span><code class="select-option-key">{{ item.key }}</code>
+                      </el-option>
+                    </el-select>
+                    <div class="muted">API 只执行这一个成功条件；未选择时保留历史成功契约兼容逻辑。</div>
+                  </el-form-item>
+                </div>
+                <ApiResponseFieldsEditor :model-value="responseSchemaConfig" @update:model-value="updateResponseSchema" />
+              </section>
+            </el-tab-pane>
+          </el-tabs>
+        </el-form>
       </div>
-
-      <section class="api-editor-section api-editor-section-request">
-        <div class="api-section-heading"><span class="api-section-index">02</span><div><h3>请求配置</h3><p>维护动态 Query、Header 和 Body 参数契约。</p></div></div>
-        <ApiRequestEditor
-          v-if="form.protocol === 'ws'"
-          v-model="form.request"
-          :protocol="form.protocol"
-        />
-        <ApiParametersEditor v-model="parameterItems" :path-params="pathParameterNames" />
-      </section>
-
-      <section class="api-editor-section api-editor-section-response">
-        <div class="api-section-heading api-section-heading-with-meta"><span class="api-section-index">03</span><div><h3>响应配置</h3><p>配置响应媒体类型、成功条件和响应字段结构。</p></div></div>
-        <div class="response-config-meta">
-          <el-form-item v-if="form.protocol === 'http'" label="响应媒体类型（Accept）" class="response-accept-field">
-            <el-select
-              v-model="requestSchemaAccept"
-              class="response-accept-select"
-              filterable
-              allow-create
-              clearable
-              default-first-option
-              popper-class="response-accept-popper"
-              placeholder="选择或输入媒体类型"
-            >
-              <el-option v-for="option in commonAcceptOptions" :key="option.value" :label="option.value" :value="option.value">
-                <span>{{ option.label }}</span><code>{{ option.value }}</code>
-              </el-option>
-            </el-select>
-          </el-form-item>
-          <el-form-item label="成功条件" class="response-success-assertion-field">
-            <el-select v-model="form.success_assertion_id" clearable placeholder="选择一个成功条件">
-              <el-option v-for="item in assertions" :key="item.id" :label="item.name" :value="item.id">
-                <span>{{ item.name }}</span><code class="select-option-key">{{ item.key }}</code>
-              </el-option>
-            </el-select>
-            <div class="muted">API 只执行这一个成功条件；未选择时保留历史成功契约兼容逻辑。</div>
-          </el-form-item>
+    </div>
+    <template #footer>
+      <div class="api-editor-footer">
+        <el-button plain @click="openRequestPreview">请求预览</el-button>
+        <div class="api-editor-footer-actions">
+          <el-button @click="dialog = false">取消</el-button>
+          <el-button type="primary" :disabled="!displayKey || !form.name" @click="save">保存</el-button>
         </div>
-        <ApiResponseFieldsEditor :model-value="responseSchemaConfig" @update:model-value="updateResponseSchema" />
+      </div>
+    </template>
+  </el-dialog>
+
+  <el-dialog
+    v-model="requestPreviewOpen"
+    title="请求预览"
+    width="860px"
+    class="api-request-preview-dialog"
+  >
+    <div class="api-request-preview-body">
+      <section class="api-request-preview-section">
+        <div class="api-request-preview-section-head">
+          <strong>REQUEST</strong>
+          <small>模板配置与当前 API 配置合并后的请求</small>
+        </div>
+        <pre class="api-request-preview-code">{{ requestPreviewText }}</pre>
       </section>
 
-    </el-form>
-    <template #footer><el-button @click="dialog = false">取消</el-button><el-button type="primary" :disabled="!displayKey || !form.name" @click="save">保存</el-button></template>
+      <section class="api-request-preview-section">
+        <div class="api-request-preview-section-head">
+          <strong>RESPONSE</strong>
+          <small>按响应 Schema、成功契约和参考案例生成的预期响应</small>
+        </div>
+        <pre class="api-request-preview-code api-request-preview-code-response">{{ responsePreviewText }}</pre>
+      </section>
+
+      <section v-if="requestPreviewTemplate" class="api-request-preview-section api-request-preview-template">
+        <div class="api-request-preview-section-head">
+          <strong>API TEMPLATE</strong>
+          <small>{{ requestPreviewTemplate.name }}</small>
+        </div>
+        <pre class="api-request-preview-code api-request-preview-code-template">{{ requestPreviewTemplateText }}</pre>
+      </section>
+
+      <p class="api-request-preview-note">仅展示按当前配置拼接的请求与预期响应；选择 API 模板时同时展示模板配置，不会发送请求。</p>
+    </div>
+    <template #footer>
+      <el-button @click="requestPreviewOpen = false">关闭</el-button>
+    </template>
   </el-dialog>
 
   <el-dialog v-model="templateDialog" :title="editingTemplateId ? '编辑 API 模板' : '新建 API 模板'" width="700px">
@@ -932,7 +1342,7 @@ watch(apiSearch, () => { apiPage.value = 1 })
             <div class="execution-parameter-grid">
               <label v-for="parameter in group.parameters" :key="parameterKey(parameter)" class="execution-parameter-field">
                 <span class="execution-parameter-label">
-                  <code>{{ parameter.name }}</code>
+                  <code :style="{ paddingLeft: `${Number(parameter.parameter_depth || 0) * 12}px` }">{{ parameterDisplayName(parameter) }}</code>
                   <em v-if="parameter.required">必填</em>
                 </span>
                 <el-input

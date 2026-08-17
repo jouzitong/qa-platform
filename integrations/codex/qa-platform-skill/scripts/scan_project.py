@@ -79,6 +79,7 @@ SOURCE_SUFFIXES = {
 BUILD_METADATA_NAMES = {"pom.xml", "build.gradle", "build.gradle.kts", "go.mod", "package.json"}
 ARCHITECTURE_SUFFIXES = {".properties"}
 HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE"}
+JAVA_TYPE_MARKER = "x-qa-platform-java-type"
 SPRING_APPLICATION_CONFIG_RE = re.compile(
     r"^(?:application|bootstrap)(?:[-.][A-Za-z0-9_.-]+)?\.(?:properties|ya?ml|json)$",
     re.IGNORECASE,
@@ -1079,7 +1080,10 @@ def _java_schema_for_type(type_name: str) -> dict[str, Any]:
         return {"type": "string"}
     if simple in {"object", "jsonnode", "jsonobject", "map", "dictionary"}:
         return {"type": "object"}
-    return {"type": "object"}
+    # Keep the source DTO name as an internal marker until all Java type
+    # declarations have been indexed.  The marker is removed before the
+    # schema reaches the import manifest.
+    return {"type": "object", JAVA_TYPE_MARKER: raw}
 
 
 def _java_literal_value(value: str) -> Any | None:
@@ -1216,11 +1220,24 @@ def _java_field_schema(
     )
     if not parameter:
         return None
-    property_schema = {
-        key: deepcopy(item)
-        for key, item in parameter.items()
-        if key not in {"name", "in", "required"}
-    }
+    # Keep the original Java type marker (and nested array item marker) until
+    # ``build_java_type_schemas`` has indexed every DTO.  The normalized
+    # parameter itself intentionally does not expose this implementation
+    # detail.
+    property_schema = deepcopy(schema)
+    for key, item in parameter.items():
+        if key in {"name", "in", "required", "children"}:
+            continue
+        if (
+            key == "items"
+            and isinstance(schema.get("items"), dict)
+            and JAVA_TYPE_MARKER in schema["items"]
+            and isinstance(item, dict)
+        ):
+            property_schema["items"] = deepcopy(schema["items"])
+            property_schema["items"]["type"] = item.get("type")
+            continue
+        property_schema[key] = deepcopy(item)
     return name, property_schema, bool(parameter.get("required"))
 
 
@@ -1291,7 +1308,7 @@ def _java_schema_for_declaration(
 def build_java_type_schemas(
     files: list[Path], language: str | None = "en"
 ) -> dict[str, dict[str, Any]]:
-    """Build a small DTO index for Spring request-body top-level properties."""
+    """Build a DTO index and expand nested DTO object properties recursively."""
     schemas: dict[str, dict[str, Any]] = {}
     for path in files:
         if path.suffix.lower() not in {".java", ".kt"}:
@@ -1311,7 +1328,41 @@ def build_java_type_schemas(
             names = [str(candidate["name"]) for candidate in parents] + [str(declaration["name"])]
             for key in (".".join(names), names[-1]):
                 schemas.setdefault(key, schema)
+    for key in list(schemas):
+        schemas[key] = _expand_java_schema_references(schemas[key], schemas, {key})
     return schemas
+
+
+def _expand_java_schema_references(
+    schema: dict[str, Any],
+    schemas: dict[str, dict[str, Any]],
+    trail: set[str],
+) -> dict[str, Any]:
+    """Resolve statically indexed Java DTO fields without following cycles forever."""
+    result = deepcopy(schema)
+    reference = result.pop(JAVA_TYPE_MARKER, None)
+    if isinstance(reference, str):
+        candidates = [reference, reference.rsplit(".", 1)[-1]]
+        target_name = next((candidate for candidate in candidates if candidate in schemas), None)
+        if target_name and target_name not in trail:
+            expanded = _expand_java_schema_references(
+                schemas[target_name], schemas, {*trail, target_name}
+            )
+            expanded.update(result)
+            result = expanded
+
+    properties = result.get("properties")
+    if isinstance(properties, dict):
+        result["properties"] = {
+            str(name): _expand_java_schema_references(value, schemas, trail)
+            if isinstance(value, dict)
+            else value
+            for name, value in properties.items()
+        }
+    items = result.get("items")
+    if isinstance(items, dict):
+        result["items"] = _expand_java_schema_references(items, schemas, trail)
+    return result
 
 
 def _resolve_java_body_schema(type_name: str, schemas: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -1839,7 +1890,7 @@ def _resolve_openapi_schema(
 
 
 def _materialize_all_of(schema: dict[str, Any]) -> dict[str, Any]:
-    """Expose composed object fields for qa-platform's flat field editors."""
+    """Expose composed object fields for qa-platform's schema and parameter editors."""
     result = deepcopy(schema)
     branches = result.get("allOf")
     if not isinstance(branches, list):

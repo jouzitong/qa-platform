@@ -169,11 +169,21 @@ Do not place live authorization headers, cookies, passwords, or tokens in reques
 [
   {"name": "id", "in": "path", "type": "integer", "required": true, "description": "Path parameter `id` (integer).", "example": 1},
   {"name": "page", "in": "query", "type": "integer", "required": false, "description": "Query parameter `page` (integer).", "example": 1, "default": 1},
-  {"name": "name", "in": "body", "type": "string", "required": true, "description": "Request body parameter `name` (string).", "example": "example-name"}
+  {
+    "name": "profile",
+    "in": "body",
+    "type": "object",
+    "required": false,
+    "description": "Request body parameter `profile` (object).",
+    "example": {},
+    "children": [
+      {"name": "locale", "type": "string", "required": true, "description": "Language.", "example": "en-US"}
+    ]
+  }
 ]
 ```
 
-The execution engine writes `path`, `query`, `header`, and top-level JSON `body` values into distinct request locations. `description` and `example` are mandatory in every generated parameter; `default` remains absent unless supported by source/config facts. Validate this array with `validate-import.py`; read [api-definition-protocol.md](api-definition-protocol.md) for required fields, source mappings, merge rules, defaults, security, and unsupported content types.
+The execution engine writes `path`, `query`, `header`, and JSON `body` values into distinct request locations. An object parameter may recursively contain `children`; child fields omit `in` and inherit the parent location, while arrays retain `items` without array-index paths. `description` and `example` are mandatory on every root and child parameter; `default` remains absent unless supported by source/config facts. Validate this tree with `validate-import.py`; read [api-definition-protocol.md](api-definition-protocol.md) for required fields, source mappings, merge rules, defaults, security, and unsupported content types.
 
 ## Project-configured success assertions
 

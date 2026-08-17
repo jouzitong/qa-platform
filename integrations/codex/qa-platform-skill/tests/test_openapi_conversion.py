@@ -173,6 +173,29 @@ class OpenApiConversionTests(unittest.TestCase):
                                                     "description": "购买数量。",
                                                     "default": 1,
                                                     "minimum": 1,
+                                                },
+                                                "metadata": {
+                                                    "type": "object",
+                                                    "description": "订单元数据。",
+                                                    "required": ["source"],
+                                                    "properties": {
+                                                        "source": {
+                                                            "type": "string",
+                                                            "description": "元数据来源。",
+                                                            "example": "checkout",
+                                                        },
+                                                        "retry": {
+                                                            "type": "object",
+                                                            "properties": {
+                                                                "count": {
+                                                                    "type": "integer",
+                                                                    "description": "重试次数。",
+                                                                    "default": 2,
+                                                                    "example": 2,
+                                                                }
+                                                            },
+                                                        },
+                                                    },
                                                 }
                                             },
                                         },
@@ -274,6 +297,18 @@ class OpenApiConversionTests(unittest.TestCase):
                                         "type": "string",
                                         "description": "登录账号。",
                                         "example": "user@example.com",
+                                    },
+                                    "profile": {
+                                        "type": "object",
+                                        "required": ["locale"],
+                                        "properties": {
+                                            "locale": {
+                                                "type": "string",
+                                                "description": "登录语言。",
+                                                "default": "zh-CN",
+                                                "example": "zh-CN",
+                                            }
+                                        },
                                     }
                                 },
                             },
@@ -364,7 +399,9 @@ class OpenApiConversionTests(unittest.TestCase):
                 order["request"]["headers"]["Content-Type"], "application/json"
             )
             request_schema = order["request_schema"]["schema"]
-            self.assertEqual(set(request_schema["properties"]), {"name", "quantity"})
+            self.assertEqual(
+                set(request_schema["properties"]), {"name", "quantity", "metadata"}
+            )
             self.assertEqual(request_schema["properties"]["name"]["example"], "Codex Order")
             self.assertEqual(request_schema["properties"]["quantity"]["example"], 2)
             parameters = {(item["in"], item["name"]): item for item in order["parameters"]}
@@ -372,6 +409,15 @@ class OpenApiConversionTests(unittest.TestCase):
             self.assertEqual(parameters[("path", "orderId")]["example"], 42)
             self.assertEqual(parameters[("query", "dryRun")]["default"], False)
             self.assertEqual(parameters[("body", "quantity")]["minimum"], 1)
+            metadata = parameters[("body", "metadata")]
+            self.assertNotIn("in", metadata["children"][0])
+            self.assertEqual(
+                [(item["name"], item["type"], item["required"]) for item in metadata["children"]],
+                [("source", "string", True), ("retry", "object", False)],
+            )
+            retry = next(item for item in metadata["children"] if item["name"] == "retry")
+            self.assertEqual(retry["children"][0]["name"], "count")
+            self.assertEqual(retry["children"][0]["default"], 2)
             self.assertEqual(order["response_schema"]["properties"]["id"]["example"], 1001)
             self.assertEqual(
                 order["response_schema"]["properties"]["status"]["example"],
@@ -394,6 +440,12 @@ class OpenApiConversionTests(unittest.TestCase):
                 legacy["response_schema"]["properties"]["tokenType"]["example"],
                 "Bearer",
             )
+            legacy_parameters = {
+                (item["in"], item["name"]): item for item in legacy["parameters"]
+            }
+            profile = legacy_parameters[("body", "profile")]
+            self.assertEqual(profile["children"][0]["name"], "locale")
+            self.assertEqual(profile["children"][0]["default"], "zh-CN")
 
             broken = json.loads(manifest_path.read_text(encoding="utf-8"))
             broken_order = next(

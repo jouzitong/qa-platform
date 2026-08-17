@@ -22,7 +22,7 @@ Read sources in this order: CLI/configured local documents, automatically discov
 - Preserve `summary`, `description`, `operationId`, tags, security override, types, formats, required fields, enum, pattern, numeric/string/array constraints, defaults, and examples.
 - Flatten resolved `allOf` object properties/required names into the visible schema while retaining the composed schema, so qa-platform's request/response field editors do not lose inherited fields.
 - Map OpenAPI request JSON media type to request `Content-Type`. Map the selected successful response JSON media type (or Swagger `produces`) to `request_schema.accept`, which materializes as the HTTP `Accept` header.
-- Preserve request fields in `request_schema.schema`, response fields in `response_schema`, and executable request fields in `parameters`. Media-level object examples propagate to matching fields.
+- Preserve request fields in `request_schema.schema`, response fields in `response_schema`, and executable request fields in `parameters`. For every resolved JSON object, recursively materialize executable `children` with each layer's required/default/example/description facts; child nodes inherit the root `in` location. Media-level object examples propagate to matching fields.
 - If a documented field lacks description/example, generate only a deterministic neutral placeholder and add an API warning. If a non-204 successful response has no readable JSON schema, keep it empty and warn rather than letting AI invent a response.
 
 `openapi.runtime_discovery` recognizes conventional paths only when matching framework evidence exists: Springdoc `/v3/api-docs`, Springfox `/v2/api-docs`, FastAPI `/openapi.json`, Nest Swagger `/api-json`, and Swaggo `/swagger/doc.json`. Projects with custom endpoints should configure `openapi.urls` or `runtime_discovery.paths` explicitly.
@@ -67,7 +67,7 @@ For path-only fallbacks, use meaningful route segments plus the HTTP action. A g
 
 ## Parameter discovery
 
-Build API parameters with the executable contract in [api-definition-protocol.md](api-definition-protocol.md), not by copying framework/OpenAPI objects verbatim. Every emitted parameter must have a non-empty description and a safe example. Preserve source descriptions/examples when available; otherwise derive a neutral description from location/name/type and a deterministic UI-only example from type, format, or enum. Only emit a default when source/config explicitly declares one. Path placeholders are available for every route source. OpenAPI/Swagger and Spring typed signatures add higher-confidence parameter facts; unsupported multipart, form, scalar, and unresolved body shapes remain warnings instead of fabricated `body` fields.
+Build API parameters with the executable contract in [api-definition-protocol.md](api-definition-protocol.md), not by copying framework/OpenAPI objects verbatim. Every root and recursive child parameter must have a non-empty description and a safe example. Preserve source descriptions/examples when available; otherwise derive a neutral description from location/name/type and a deterministic UI-only example from type, format, or enum. Only emit a default when source/config explicitly declares one. Path placeholders are available for every route source. OpenAPI/Swagger and Spring typed signatures add higher-confidence parameter facts; object fields become `children`, arrays retain `items`, and unsupported multipart, form, scalar, and unresolved body shapes remain warnings instead of fabricated `body` fields.
 
 ## Confidence
 

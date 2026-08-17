@@ -6,18 +6,18 @@
 
 ## 运行时边界
 
-qa-platform 只执行四类扁平参数：
+qa-platform 执行四类请求位置；参数树的根节点使用 `in`，`object` 子节点通过 `children` 递归继承根节点位置：
 
 | `in` | 写入请求位置 | 说明 |
 | --- | --- | --- |
 | `path` | `request.path_params[name]`，替换 URL/Path 占位符 | 必须为 `required: true` |
 | `query` | `request.query[name]` | HTTP URL 查询串 |
 | `header` | `request.headers[name]` | HTTP Header 或 WS 握手 Header |
-| `body` | `request.body[name]` | 仅 JSON 对象的顶层字段 |
+| `body` | `request.body[name]` | JSON 对象字段；嵌套字段通过 `children` 合并到对应对象 |
 
 执行器会先将未传入的 `default` 写入上下文，再根据 `type` 将字符串转换为整数、浮点数、布尔值或 JSON 对象/数组。`example` 仅供编辑和测试界面展示，不会自动发送。
 
-因此，扫描器只把 JSON 对象顶层字段构造成 `body` 参数。嵌套对象和数组作为一个 `object`/`array` 参数保留；不使用 `user.profile.name`、`items[0].id` 等伪路径。根标量、根数组、`multipart/form-data`、文件上传和 `application/x-www-form-urlencoded` 不能由当前执行器正确序列化，保留 schema 与警告，改由人工请求覆盖处理。
+扫描器把 JSON 对象顶层字段构造成 `body` 参数，并把每个可识别的嵌套对象递归构造成 `children`。子节点不重复写 `in`，执行器沿父节点继承 `body` 位置；不使用 `user.profile.name`、`items[0].id` 等伪路径。数组保留 `items` 类型，不展开数组索引，也不把数组元素伪装成普通子参数。根标量、根数组、`multipart/form-data`、文件上传和 `application/x-www-form-urlencoded` 不能由当前执行器正确序列化，保留 schema 与警告，改由人工请求覆盖处理。
 
 ## 规范参数对象
 
@@ -45,6 +45,7 @@ qa-platform 只执行四类扁平参数：
 - `example`：必须为已填充的 JSON 值。优先保留源码示例；没有时按类型、格式或枚举生成安全、确定性的 UI 示例。
 - `default`：可选 JSON 值，只传播源码或项目配置明确声明的默认值。数组和对象使用 JSON 值，不使用序列化后的 JSON 字符串。
 - 约束：可选 `format`、`enum`、`pattern`、`minimum`、`maximum`、`minLength`、`maxLength`、`minItems`、`maxItems`、`uniqueItems`。`array` 可附带 `items: {"type": "..."}`。
+- `children`：仅 `object` 使用的可选数组。子节点继续使用 `name`、`type`、`required`、非空 `description`、`example` 和可选 `default`/约束，但省略 `in` 并继承父节点位置；子节点名称在同一对象内必须唯一。
 
 参数唯一键为 `(in, name)`；Header 名字大小写不敏感。`path` 即使上游声明为可选，也必须归一为必填。
 
@@ -81,6 +82,28 @@ qa-platform 只执行四类扁平参数：
 }
 ```
 
+嵌套对象示例：
+
+```json
+{
+  "name": "profile",
+  "in": "body",
+  "type": "object",
+  "required": false,
+  "description": "用户资料。",
+  "example": {},
+  "children": [
+    {
+      "name": "locale",
+      "type": "string",
+      "required": true,
+      "description": "语言。",
+      "example": "zh-CN"
+    }
+  ]
+}
+```
+
 ## 来源映射
 
 ### OpenAPI 3 / Swagger 2
@@ -89,7 +112,7 @@ qa-platform 只执行四类扁平参数：
 - 解析本地 `#/...` `$ref`，包括参数、请求体、响应和 schema 属性。外部或循环引用保留警告，不能伪造字段。
 - OpenAPI `in: path/query/header` 映射为同名位置。`cookie` 不导入为可执行参数；请求运行时不应把 Cookie 当成普通 Header 默认值。
 - Swagger 2 直接位于 Parameter Object 的 `type`、`format`、`items`、`default`、`enum` 等字段须归一为 schema。
-- OpenAPI `requestBody.content.application/json` 或 `application/*+json` 的顶层 `properties` 映射为 `body`。`required` 数组决定字段必填。
+- OpenAPI `requestBody.content.application/json` 或 `application/*+json` 的顶层 `properties` 映射为 `body`，嵌套 `object.properties` 递归映射为 `children`。每一层的 `required` 数组决定该层字段必填。
 - Swagger 2 `in: body` 使用同一 JSON 对象展开规则。`in: formData` 只生成警告，不作为 JSON `body` 参数。
 - OpenAPI 请求媒体类型或 Swagger 2 `consumes` 生成 `Content-Type`；成功响应 JSON 媒体类型或 `produces` 生成 `request_schema.accept` / `Accept`。
 - 解析参数、请求体、响应及嵌套 schema 的本地 `$ref`，并把 `allOf` 继承字段展开到可视化编辑器可见的 `properties` / `required`。
@@ -109,7 +132,7 @@ qa-platform 只执行四类扁平参数：
 
 `required = false` 或 `Optional<T>` 生成非必填参数；`defaultValue` 生成 `default` 并使该参数非必填。Java `String`、整数包装类型、浮点类型、布尔类型、集合、Map 和数组映射到六个规范类型。`@NotNull`、`@NotBlank`、`@NotEmpty` 标记 DTO 字段必填；`@Size`、`@Min`、`@Max`、`@Pattern`、`@Schema` / `@Parameter` 的可读元数据会尽可能保留。
 
-DTO 解析是静态、保守的：支持类、嵌套类和 record 的直接字段；嵌套 DTO 仍作为一个 `object` 字段。未知 DTO、Map、根数组或标量 body 不生成虚假的顶层字段，而是添加警告。`MultipartFile` / `Part` 不生成可执行参数，因为当前运行时只发送 JSON。
+DTO 解析是静态、保守的：支持类、嵌套类和 record 的字段，并对索引到的嵌套 DTO 递归生成 `children`；循环引用在当前可解析边界停止。未知 DTO、Map、根数组或标量 body 不生成虚假的顶层字段，而是添加警告。`MultipartFile` / `Part` 不生成可执行参数，因为当前运行时只发送 JSON。
 
 ### 其他框架与 WebSocket
 
@@ -127,7 +150,7 @@ DTO 解析是静态、保守的：支持类、嵌套类和 record 的直接字�
 
 ## 校验与导入
 
-`validate-import.py` 会拒绝：非数组参数集、空名称、未知位置/类型、非布尔 `required`、非必填 Path 参数、空说明、缺失/空示例、重复 `(in, name)`、Header 名字仅大小写不同的重复项、非对象 `request_schema.schema` / `response_schema`，以及响应 Schema 中缺少非空说明或示例的可见字段。验证成功后，ZIP 构建器才将参数和请求/响应 Schema 写入 API 实体；导入预览和人工审批仍是生效的前置条件。
+`validate-import.py` 会拒绝：非数组参数集、空名称、未知位置/类型、非布尔 `required`、非必填 Path 参数、空说明、缺失/空示例、重复 `(in, name)`、Header 名字仅大小写不同的重复项、非 `object` 参数挂载 `children`、同一 object 内重复子字段、子节点声明了不同于父级的位置、非对象 `request_schema.schema` / `response_schema`，以及响应 Schema 中缺少非空说明或示例的可见字段。验证成功后，ZIP 构建器才将递归参数和请求/响应 Schema 写入 API 实体；导入预览和人工审批仍是生效的前置条件。
 
 ## 示例
 

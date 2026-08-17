@@ -476,6 +476,98 @@ spring:
         self.assertIn("path parameters must be required", "\n".join(report["errors"]))
         self.assertIn("duplicate parameter identity: header:x-trace", report["errors"])
 
+    def test_validator_accepts_recursive_object_children_and_rejects_incomplete_child(self) -> None:
+        manifest = {
+            "format": "qa-platform-import",
+            "version": "1.0",
+            "package_version": "v1.0.0",
+            "project": {
+                "key": "demo",
+                "name": "Demo",
+                "variables": {"base_url": "127.0.0.1:8000"},
+            },
+            "assertion_definitions": [{"key": "config:http-success"}],
+            "interfaces": {
+                "http": [
+                    {
+                        "key": "http:POST:/orders",
+                        "method": "POST",
+                        "path": "/orders",
+                        "success_assertion_key": "config:http-success",
+                        "parameters": [
+                            {
+                                "name": "body",
+                                "in": "body",
+                                "type": "object",
+                                "required": True,
+                                "description": "请求体。",
+                                "example": {},
+                                "children": [
+                                    {
+                                        "name": "profile",
+                                        "type": "object",
+                                        "required": False,
+                                        "description": "用户资料。",
+                                        "example": {},
+                                        "children": [
+                                            {
+                                                "name": "locale",
+                                                "type": "string",
+                                                "required": True,
+                                                "description": "语言。",
+                                                "example": "zh-CN",
+                                            }
+                                        ],
+                                    },
+                                    {
+                                        "name": "tags",
+                                        "type": "array",
+                                        "required": False,
+                                        "description": "标签。",
+                                        "example": [],
+                                        "items": {"type": "string"},
+                                    },
+                                ],
+                            }
+                        ],
+                        "source_refs": [],
+                    }
+                ],
+                "ws": [],
+            },
+            "features": [],
+            "test_cases": [],
+            "flows": [],
+            "test_plans": [],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            valid_path = root / "valid.json"
+            valid_path.write_text(json.dumps(manifest), encoding="utf-8")
+            valid = subprocess.run(
+                [sys.executable, str(VALIDATE), str(valid_path), "--json"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(valid.returncode, 0, valid.stdout)
+
+            invalid = json.loads(json.dumps(manifest))
+            invalid["interfaces"]["http"][0]["parameters"][0]["children"][0][
+                "description"
+            ] = ""
+            invalid_path = root / "invalid-child.json"
+            invalid_path.write_text(json.dumps(invalid), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(VALIDATE), str(invalid_path), "--json"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        report = json.loads(result.stdout)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("children[0].description must be", "\n".join(report["errors"]))
+
     def test_validator_enforces_one_plan_for_each_package_version(self) -> None:
         manifest = {
             "format": "qa-platform-import",
@@ -548,6 +640,14 @@ spring:
                         @Min(1)
                         private Long quantity;
                         private Boolean enabled;
+                        private DemoMetadata metadata;
+                    }
+
+                    public static class DemoMetadata {
+                        @NotBlank
+                        private String source;
+                        @Min(1)
+                        private Integer retryCount = 2;
                     }
                 }
                 """,
@@ -668,7 +768,17 @@ spring:
                     ("body", "name", "string", True),
                     ("body", "quantity", "integer", False),
                     ("body", "enabled", "boolean", False),
+                    ("body", "metadata", "object", False),
                 },
+            )
+            metadata = next(item for item in spring_post["parameters"] if item["name"] == "metadata")
+            self.assertEqual(
+                [(item["name"], item["type"], item["required"]) for item in metadata["children"]],
+                [("source", "string", True), ("retryCount", "integer", False)],
+            )
+            self.assertEqual(
+                next(item for item in metadata["children"] if item["name"] == "retryCount")["default"],
+                2,
             )
 
             order_get = interfaces[("GET", "/orders/{orderId}")]

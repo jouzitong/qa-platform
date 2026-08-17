@@ -1,8 +1,9 @@
 """Canonical qa-platform API parameter construction helpers.
 
-The qa-platform executor understands a deliberately small, flat parameter model:
-``path``, ``query``, ``header`` and top-level JSON ``body`` fields.  This module
-normalizes source/OpenAPI metadata into that executable shape.
+The qa-platform executor understands four request locations: ``path``,
+``query``, ``header`` and JSON ``body``.  Body objects use a recursive
+``children`` tree so nested DTO/schema fields remain executable without
+inventing dotted parameter paths.
 """
 
 from __future__ import annotations
@@ -30,6 +31,10 @@ def parameter_type(value: Any, *, schema: dict[str, Any] | None = None) -> str:
     raw = str(value or schema.get("type") or "").strip().lower()
     format_value = str(schema.get("format") or "").strip().lower()
     raw = raw.removeprefix("?")
+    if not raw and any(
+        key in schema for key in ("properties", "additionalProperties", "allOf")
+    ):
+        return "object"
     if raw.startswith("optional<") and raw.endswith(">"):
         return parameter_type(raw[len("optional<") : -1], schema={})
     generic_base = raw.split("<", 1)[0].strip()
@@ -135,6 +140,29 @@ def _fallback_example(name: str, type_name: str, schema: dict[str, Any], languag
     return "example" if not _uses_chinese(language) else "示例值"
 
 
+def _object_schema_parts(schema: dict[str, Any]) -> tuple[dict[str, Any], set[str]]:
+    """Merge object properties and required names from nested ``allOf`` branches."""
+    properties: dict[str, Any] = {}
+    required_names: set[str] = set()
+
+    own_properties = schema.get("properties")
+    if isinstance(own_properties, dict):
+        properties.update(own_properties)
+    required_names.update(
+        str(value) for value in schema.get("required", []) if isinstance(value, str)
+    )
+
+    branches = schema.get("allOf")
+    if isinstance(branches, list):
+        for branch in branches:
+            if not isinstance(branch, dict):
+                continue
+            branch_properties, branch_required = _object_schema_parts(branch)
+            properties.update(branch_properties)
+            required_names.update(branch_required)
+    return properties, required_names
+
+
 def _sample_from_examples(value: Any) -> Any:
     if isinstance(value, dict):
         for item in value.values():
@@ -208,6 +236,20 @@ def parameter_from_schema(
     ):
         if field in schema:
             result[field] = deepcopy(schema[field])
+    if resolved_type == "object":
+        children = parameters_from_object_schema(schema, language=language)
+        if children:
+            # ``in`` belongs to the root executable parameter.  Descendants
+            # inherit the root location and therefore stay compact in the
+            # public contract.
+            result["children"] = [
+                {
+                    key: deepcopy(value)
+                    for key, value in child.items()
+                    if key != "in"
+                }
+                for child in children
+            ]
     if result["type"] == "array" and isinstance(schema.get("items"), dict):
         item_type = parameter_type(schema=schema["items"], value=schema["items"].get("type"))
         result["items"] = {"type": item_type}
@@ -263,20 +305,10 @@ def normalize_openapi_parameter(raw: Any, *, language: str | None = "en") -> dic
 
 
 def parameters_from_object_schema(schema: Any, *, language: str | None = "en") -> list[dict[str, Any]]:
-    """Emit top-level JSON body fields; nested values remain object/array values."""
+    """Emit top-level JSON body fields and recursively materialize object children."""
     if not isinstance(schema, dict):
         return []
-    sources = [schema]
-    sources.extend(item for item in schema.get("allOf", []) if isinstance(item, dict))
-    properties: dict[str, Any] = {}
-    required_names: set[str] = set()
-    for source in sources:
-        source_properties = source.get("properties")
-        if isinstance(source_properties, dict):
-            properties.update(source_properties)
-        required_names.update(
-            str(value) for value in source.get("required", []) if isinstance(value, str)
-        )
+    properties, required_names = _object_schema_parts(schema)
     if not properties:
         return []
     result: list[dict[str, Any]] = []

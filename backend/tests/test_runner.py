@@ -62,6 +62,77 @@ def test_parameter_defaults_build_request_values_and_inputs_override() -> None:
     assert overridden["path"] == "/users/7"
 
 
+def test_object_parameter_children_build_nested_body_and_accept_nested_inputs() -> None:
+    api = ApiDefinition(
+        project_id="project",
+        key="validate",
+        name="validate",
+        protocol="http",
+        request={
+            "method": "POST",
+            "base_url": "https://example.test",
+            "path": "/validate",
+        },
+        parameters=[
+            {
+                "name": "chunkMethod",
+                "in": "body",
+                "type": "object",
+                "required": True,
+                "children": [
+                    {"name": "mode", "type": "string", "default": "custom"},
+                    {"name": "maxTokens", "type": "integer", "default": "1024"},
+                ],
+            }
+        ],
+    )
+
+    defaults = build_request_config(api, {})
+    assert defaults["body"] == {
+        "chunkMethod": {"mode": "custom", "maxTokens": 1024}
+    }
+
+    nested = build_request_config(
+        api,
+        {"chunkMethod": {"mode": "semantic", "maxTokens": "2048"}},
+    )
+    assert nested["body"] == {
+        "chunkMethod": {"mode": "semantic", "maxTokens": 2048}
+    }
+
+    dotted = build_request_config(api, {"chunkMethod.mode": "hybrid"})
+    assert dotted["body"] == {
+        "chunkMethod": {"mode": "hybrid", "maxTokens": 1024}
+    }
+
+
+def test_object_parameter_child_params_alias_and_parent_value_merge() -> None:
+    api = ApiDefinition(
+        project_id="project",
+        key="object-alias",
+        name="object-alias",
+        protocol="http",
+        request={"method": "POST", "base_url": "https://example.test", "path": "/object"},
+        parameters=[
+            {
+                "name": "options",
+                "in": "body",
+                "type": "object",
+                "child_params": [
+                    {"name": "enabled", "type": "boolean", "default": "true"},
+                ],
+            }
+        ],
+    )
+
+    request = build_request_config(
+        api,
+        {"options": {"existing": "kept"}, "options.enabled": "false"},
+    )
+
+    assert request["body"] == {"options": {"existing": "kept", "enabled": False}}
+
+
 def test_path_only_api_uses_project_base_url() -> None:
     http_api = ApiDefinition(
         project_id="project",
