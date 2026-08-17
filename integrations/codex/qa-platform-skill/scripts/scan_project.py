@@ -57,6 +57,7 @@ SKIP_DIRS = {
     "build",
     "target",
     "coverage",
+    "releases",
     "__pycache__",
 }
 SOURCE_SUFFIXES = {
@@ -133,7 +134,9 @@ SPRING_WS_HANDLER_RE = re.compile(
     r"(?P<paths>(?:['\"][^'\"]+['\"]\s*,?\s*)+)\)"
 )
 FRONTEND_ROUTE_RE = re.compile(r"\bpath\s*:\s*['\"](?P<path>[^'\"]+)['\"]")
-LITERAL_RE = re.compile(r"['\"](?P<value>[^'\"]+)['\"]")
+LITERAL_RE = re.compile(
+    r"(?P<quote>['\"])(?P<value>(?:\\.|(?!(?P=quote)).)*)(?P=quote)"
+)
 METHOD_LIST_RE = re.compile(r"methods\s*=\s*\[([^]]+)\]", re.IGNORECASE)
 GATEWAY_MARKERS = (
     "spring.cloud.gateway",
@@ -597,6 +600,14 @@ def source_ref(path: Path, root: Path, line: int) -> dict[str, Any]:
     return {"file": relative, "line": line}
 
 
+def service_from_source_ref(root: Path, ref: dict[str, Any]) -> str:
+    """Resolve the owning microservice from the conventional app module path."""
+    parts = Path(str(ref.get("file") or "")).parts
+    if len(parts) >= 2 and parts[0] == "app" and parts[1].startswith("app-"):
+        return parts[1]
+    return root.name
+
+
 def add_ref(item: dict[str, Any], ref: dict[str, Any]) -> None:
     refs = item.setdefault("source_refs", [])
     if ref not in refs:
@@ -632,6 +643,7 @@ def ensure_interface(
     route_key = interface_key(protocol, method, key_path)
     bucket = interfaces[protocol]
     item = bucket.get(route_key)
+    source_service = service_from_source_ref(root, ref)
     if item is None:
         candidate_business_key = business_key or derive_business_key(
             protocol, method, key_path, name=name, operation_id=operation_id
@@ -653,7 +665,7 @@ def ensure_interface(
             "_description_priority": DISCOVERY_PRIORITIES.get(discovery_method, 1)
             if str(description or "").strip()
             else -1,
-            "service": root.name,
+            "service": source_service,
             "parameters": [],
             "request_schema": {},
             "response_schema": {},
@@ -673,6 +685,15 @@ def ensure_interface(
         # A later, higher-signal source may improve feature grouping, but it
         # must not change the stable route key.
         item["_business_key"] = business_key
+    current_service = str(item.get("service") or root.name)
+    if current_service == root.name and source_service != root.name:
+        item["service"] = source_service
+    elif source_service != root.name and current_service != source_service:
+        warning = (
+            f"Route is declared by multiple service modules: {current_service}, {source_service}"
+        )
+        if warning not in item["warnings"]:
+            item["warnings"].append(warning)
     add_ref(item, ref)
     item["confidence"] = max(float(item.get("confidence", 0)), confidence)
     incoming_priority = DISCOVERY_PRIORITIES.get(discovery_method, 1)
@@ -1475,7 +1496,7 @@ def parse_spring_routes(
 ) -> None:
     if path.suffix.lower() not in {".java", ".kt"}:
         return
-    class_prefixes: list[tuple[int, str, str]] = []
+    class_prefixes: list[tuple[int, str, str, bool]] = []
     class_mapping = re.compile(
         r"@RequestMapping\s*(?:\((?P<args>[^\n)]*)\))?\s*(?:public\s+|protected\s+|private\s+|abstract\s+|final\s+)*(?:class|interface)\b"
     )
@@ -1493,6 +1514,35 @@ def parse_spring_routes(
                 declaration_position,
                 first_literal(class_match.group("args") or "") or "/",
                 _java_doc_before(text, declaration_position),
+                True,
+            )
+        )
+    for feign_match in re.finditer(r"@(?:[A-Za-z_$][\w$]*\.)*FeignClient\b", text):
+        arguments_start = text.find("(", feign_match.end())
+        if arguments_start < 0:
+            continue
+        arguments_end = _find_matching_delimiter(text, arguments_start)
+        if arguments_end is None:
+            continue
+        declaration_match = re.search(
+            r"\b(?:class|interface)\b", text[arguments_end + 1 : arguments_end + 2001]
+        )
+        if not declaration_match:
+            continue
+        declaration_position = arguments_end + 1 + declaration_match.start()
+        annotation = text[feign_match.start() : arguments_end + 1]
+        feign_prefix = _annotation_string(
+            annotation, "FeignClient", "path", allow_unnamed=False
+        )
+        if not feign_prefix:
+            continue
+        mapped_declaration_positions.add(declaration_position)
+        class_prefixes.append(
+            (
+                declaration_position,
+                feign_prefix,
+                _java_doc_before(text, declaration_position),
+                False,
             )
         )
     for declaration_match in re.finditer(
@@ -1502,7 +1552,9 @@ def parse_spring_routes(
         declaration_position = declaration_match.start()
         if any(abs(declaration_position - mapped) < 80 for mapped in mapped_declaration_positions):
             continue
-        class_prefixes.append((declaration_position, "", _java_doc_before(text, declaration_position)))
+        class_prefixes.append(
+            (declaration_position, "", _java_doc_before(text, declaration_position), True)
+        )
 
     for match in SPRING_RE.finditer(text):
         if match.start() in class_mapping_positions:
@@ -1514,6 +1566,7 @@ def parse_spring_routes(
         class_context = max(preceding_prefixes, key=lambda item: item[0]) if preceding_prefixes else None
         class_prefix = class_context[1] if class_context else ""
         class_summary = class_context[2] if class_context else ""
+        apply_context_prefix = class_context[3] if class_context else True
         method_summary = _java_doc_before(text, match.start())
         api_name, api_description = _spring_name_and_description(
             class_summary,
@@ -1522,7 +1575,10 @@ def parse_spring_routes(
             method_identifier=_java_method_name_after(text, match.end()),
             language=language,
         )
-        route = join_route(context_prefix, join_route(class_prefix, route))
+        route = join_route(
+            context_prefix if apply_context_prefix else None,
+            join_route(class_prefix, route),
+        )
         line = text.count("\n", 0, match.start()) + 1
         ref = source_ref(path, root, line)
         if annotation == "MessageMapping":

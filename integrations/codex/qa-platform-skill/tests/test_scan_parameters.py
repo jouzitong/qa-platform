@@ -20,6 +20,21 @@ from scan_project import detect_architecture, discover_files, ensure_interface
 
 
 class ScanParameterTests(unittest.TestCase):
+    def test_discover_files_ignores_generated_release_bundles(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "src" / "ExampleController.java"
+            source.parent.mkdir(parents=True)
+            source.write_text("class ExampleController {}\n", encoding="utf-8")
+            generated = root / "releases" / "0.1.2" / "qa-platform-import.json"
+            generated.parent.mkdir(parents=True)
+            generated.write_text('{"path":"/generated"}\n', encoding="utf-8")
+
+            files = discover_files(root)
+
+            self.assertIn(source, files)
+            self.assertNotIn(generated, files)
+
     def test_interfaces_use_route_key_and_merge_duplicate_source_refs(self) -> None:
         interfaces = {"http": {}, "ws": {}}
 
@@ -259,6 +274,62 @@ class ScanParameterTests(unittest.TestCase):
                     f"{expected_prefix}/events",
                     {item["url"] for item in manifest["interfaces"]["ws"]},
                 )
+
+    def test_spring_feign_client_path_is_added_and_service_is_module_scoped(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            api = (
+                root
+                / "app"
+                / "app-platform-db-engine"
+                / "api"
+                / "src"
+                / "main"
+                / "java"
+                / "DbTableFieldMetaApi.java"
+            )
+            api.parent.mkdir(parents=True)
+            config = root / "app" / "app-platform-db-engine" / "config" / "application.yml"
+            config.parent.mkdir(parents=True)
+            config.write_text("server.servlet.context-path: /dbEngine\n", encoding="utf-8")
+            api.write_text(
+                """
+                import org.springframework.cloud.openfeign.FeignClient;
+                import org.springframework.web.bind.annotation.GetMapping;
+                import org.springframework.web.bind.annotation.PostMapping;
+
+                @FeignClient(
+                    name = "dbEngine",
+                    path = "/dbEngine/internal/v1/access/field"
+                )
+                public interface DbTableFieldMetaApi {
+                    @GetMapping({"", "/"})
+                    Object root();
+
+                    @PostMapping("/get")
+                    Object get();
+                }
+                """,
+                encoding="utf-8",
+            )
+            manifest_path = root / "manifest.json"
+            subprocess.run(
+                [sys.executable, str(SCAN), str(root), "--output", str(manifest_path)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        routes = {
+            (item["method"], item["path"]): item
+            for item in manifest["interfaces"]["http"]
+        }
+        self.assertNotIn(("POST", "/get"), routes)
+        self.assertNotIn(("GET", "/dbEngine/dbEngine/internal/v1/access/field/"), routes)
+        self.assertIn(("GET", "/dbEngine/internal/v1/access/field/"), routes)
+        item = routes[("POST", "/dbEngine/internal/v1/access/field/get")]
+        self.assertEqual(item["service"], "app-platform-db-engine")
 
     def test_system_success_assertion_is_referenced_by_generated_api(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
