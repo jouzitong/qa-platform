@@ -23,6 +23,7 @@ Read sources in this order: CLI/configured local documents, automatically discov
 - Flatten resolved `allOf` object properties/required names into the visible schema while retaining the composed schema, so qa-platform's request/response field editors do not lose inherited fields.
 - Map OpenAPI request JSON media type to request `Content-Type`. Map the selected successful response JSON media type (or Swagger `produces`) to `request_schema.accept`, which materializes as the HTTP `Accept` header.
 - Preserve request fields in `request_schema.schema`, response fields in `response_schema`, and executable request fields in `parameters`. For every resolved JSON object, recursively materialize executable `children` with each layer's required/default/example/description facts; child nodes inherit the root `in` location. Media-level object examples propagate to matching fields.
+- When an OpenAPI/Swagger response document is unavailable, Spring return types provide a secondary response source. Expand typed DTOs recursively, preserve JavaDoc descriptions and enum values, unwrap common transport containers, and represent recognized business envelopes as `code`/`data` with a warning that the wrapper was inferred from source.
 - If a documented field lacks description/example, generate only a deterministic neutral placeholder and add an API warning. If a non-204 successful response has no readable JSON schema, keep it empty and warn rather than letting AI invent a response.
 
 `openapi.runtime_discovery` recognizes conventional paths only when matching framework evidence exists: Springdoc `/v3/api-docs`, Springfox `/v2/api-docs`, FastAPI `/openapi.json`, Nest Swagger `/api-json`, and Swaggo `/swagger/doc.json`. Projects with custom endpoints should configure `openapi.urls` or `runtime_discovery.paths` explicitly.
@@ -38,6 +39,12 @@ The standard-library scanner recognizes common forms for:
 - Vue/React route objects containing `path: "/..."`.
 
 These are conservative recognizers, not complete parsers. Preserve a warning when a declaration is dynamic, generated, or missing a literal path.
+
+### Reusable API-template discovery
+
+`.qa-platform.json` controls template discovery with `api_template_discovery.enabled` (default `true`). Explicit `api_templates` always win. If that list is empty, inspect a shared frontend request-header builder such as `buildRequestHeaders` and Spring `gateway.security` configuration. Only emit safe defaults: JSON content type, static Accept values, trace/environment variable expressions, and `Authorization` values rewritten as `Bearer {{ access_token }}`. Never copy a literal token, signing secret, cookie, or password.
+
+The scanner may emit a public frontend template and a gateway-auth template. The latter is ordered first and maps literal `ignore-urls` to `match.exclude_paths`; excluded routes fall back to the public template. Supported exclusions are glob paths, prefixes, and regular expressions. If no reusable template is configured or discovered, emit a global warning so reviewers know that every API has no `template_key`.
 
 Literal route patterns are reliable. Dynamic prefixes, generated routers, reflection, framework plugins, and routes assembled across modules may be missed; provide an explicit OpenAPI/AsyncAPI document or review warnings when completeness matters.
 

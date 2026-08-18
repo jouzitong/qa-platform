@@ -103,6 +103,7 @@ class ApiDefinition(TimestampMixin, Base):
     request: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     request_schema: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     response_schema: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    response_unpack: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     parameters: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     examples: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     success_contract: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)

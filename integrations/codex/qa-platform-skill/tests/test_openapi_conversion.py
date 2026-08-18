@@ -468,6 +468,103 @@ class OpenApiConversionTests(unittest.TestCase):
                 validation.stdout,
             )
 
+    def test_openapi_response_envelope_is_unpacked_but_plain_response_is_not(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / ".qa-platform.json").write_text(
+                json.dumps({"variables": {"base_url": "127.0.0.1:9764"}}),
+                encoding="utf-8",
+            )
+            (root / "openapi.json").write_text(
+                json.dumps(
+                    {
+                        "openapi": "3.0.3",
+                        "paths": {
+                            "/wrapped": {
+                                "get": {
+                                    "summary": "包装响应",
+                                    "responses": {
+                                        "200": {
+                                            "description": "ok",
+                                            "content": {
+                                                "application/json": {
+                                                    "schema": {
+                                                        "type": "object",
+                                                        "required": ["code", "data"],
+                                                        "properties": {
+                                                            "code": {
+                                                                "type": "integer",
+                                                                "const": 0,
+                                                                "description": "业务响应码。",
+                                                            },
+                                                            "data": {
+                                                                "type": "object",
+                                                                "required": ["id"],
+                                                                "properties": {
+                                                                    "id": {
+                                                                        "type": "string",
+                                                                        "description": "资源 ID。",
+                                                                        "example": "u001",
+                                                                    }
+                                                                },
+                                                            },
+                                                        },
+                                                    }
+                                                }
+                                            },
+                                        }
+                                    },
+                                }
+                            },
+                            "/plain": {
+                                "get": {
+                                    "summary": "普通响应",
+                                    "responses": {
+                                        "200": {
+                                            "description": "ok",
+                                            "content": {
+                                                "application/json": {
+                                                    "schema": {
+                                                        "type": "object",
+                                                        "properties": {
+                                                            "status": {
+                                                                "type": "string",
+                                                                "description": "状态。",
+                                                                "example": "ok",
+                                                            }
+                                                        },
+                                                    }
+                                                }
+                                            },
+                                        }
+                                    },
+                                }
+                            },
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            output = root / "manifest.json"
+            subprocess.run(
+                [sys.executable, str(SCAN), str(root), "--output", str(output)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            manifest = json.loads(output.read_text(encoding="utf-8"))
+
+        apis = {item["path"]: item for item in manifest["interfaces"]["http"]}
+        wrapped = apis["/wrapped"]
+        self.assertEqual(wrapped["response_unpack"]["source"], "body.data")
+        self.assertEqual(wrapped["response_schema"]["properties"]["id"]["example"], "u001")
+        self.assertEqual(
+            wrapped["response_unpack"]["envelope_schema"]["properties"]["code"]["const"],
+            0,
+        )
+        self.assertNotIn("response_unpack", apis["/plain"])
+
 
 if __name__ == "__main__":
     unittest.main()

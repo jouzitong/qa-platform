@@ -42,7 +42,7 @@ const form = reactive({
   key: '', name: '', protocol: 'http' as 'http' | 'ws', template_id: null as string | null,
   success_assertion_id: undefined as string | null | undefined,
   description: '', request: '{}', request_schema: '{}', response_schema: '{}',
-  parameters: '[]', examples: '[]', success_contract: '{}', response_variants: '[]',
+  response_unpack: '{}', parameters: '[]', examples: '[]', success_contract: '{}', response_variants: '[]',
 })
 const templateForm = reactive({
   name: '', protocol: 'http' as 'http' | 'ws', description: '', request: '{}',
@@ -98,6 +98,32 @@ const responseSchemaConfig = computed<Record<string, unknown>>({
     catch { return {} }
   },
   set: (value) => { form.response_schema = pretty(value) },
+})
+const responseUnpackConfig = computed<Record<string, unknown>>({
+  get: () => {
+    try {
+      const value = JSON.parse(form.response_unpack)
+      return value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+    } catch { return {} }
+  },
+  set: (value) => { form.response_unpack = pretty(value) },
+})
+const responseUnpackEnabled = computed({
+  get: () => form.protocol === 'http' && responseUnpackConfig.value.enabled === true,
+  set: (enabled: boolean) => {
+    if (form.protocol !== 'http') return
+    const next: Record<string, unknown> = { ...responseUnpackConfig.value, enabled }
+    if (enabled && (typeof next.source !== 'string' || !next.source.trim())) next.source = 'body.data'
+    responseUnpackConfig.value = next
+  },
+})
+const responseUnpackSource = computed({
+  get: () => typeof responseUnpackConfig.value.source === 'string'
+    ? responseUnpackConfig.value.source
+    : 'body.data',
+  set: (value: string) => {
+    responseUnpackConfig.value = { ...responseUnpackConfig.value, source: value.trim() || 'body.data' }
+  },
 })
 const requestSchemaAccept = computed({
   get: () => {
@@ -417,15 +443,68 @@ function previewExpectedBody(examples: unknown) {
   return undefined
 }
 
-function previewResponseBodyValue() {
+function previewResponseExampleValue() {
   const apiExampleBody = previewExpectedBody(parsePreviewJson(form.examples))
   if (apiExampleBody !== undefined) return apiExampleBody
+  return previewExpectedBody(requestPreviewTemplate.value?.examples)
+}
 
-  const templateExampleBody = previewExpectedBody(requestPreviewTemplate.value?.examples)
-  if (templateExampleBody !== undefined) return templateExampleBody
+function previewNestedValue(value: unknown, path: string) {
+  let current = value
+  for (const segment of path.split('.').filter(Boolean)) {
+    if (!isRecord(current) || !Object.prototype.hasOwnProperty.call(current, segment)) return undefined
+    current = current[segment]
+  }
+  return current
+}
 
+function setPreviewNestedValue(target: Record<string, unknown>, path: string[], value: unknown) {
+  if (!path.length) return target
+  const [segment, ...rest] = path
+  if (!rest.length) {
+    target[segment] = value
+    return target
+  }
+  const child: Record<string, unknown> = isRecord(target[segment]) ? { ...target[segment] } : {}
+  target[segment] = setPreviewNestedValue(child, rest, value)
+  return target
+}
+
+function previewResponseEnvelopeValue(payload: unknown) {
+  const source = responseUnpackSource.value.split('.').slice(1).filter(Boolean)
+  const envelopeSchema = responseUnpackConfig.value.envelope_schema
+  const envelope = isRecord(envelopeSchema) ? previewSchemaSample(envelopeSchema) : {}
+  const result = isRecord(envelope) ? envelope : {}
+  if (source.length) setPreviewNestedValue(result, source, payload)
+  if (source[0] === 'data' && !Object.prototype.hasOwnProperty.call(result, 'code')) result.code = 0
+  return result
+}
+
+function previewResponsePayloadValue() {
+  const example = previewResponseExampleValue()
+  if (example !== undefined) {
+    if (responseUnpackEnabled.value) {
+      const source = responseUnpackSource.value.replace(/^body\.?/, '')
+      const unpacked = previewNestedValue(example, source)
+      if (unpacked !== undefined) return unpacked
+    }
+    return example
+  }
   if (Object.keys(responseSchemaConfig.value).length) return previewSchemaSample(responseSchemaConfig.value)
   return {}
+}
+
+function previewResponseBodyValue() {
+  const example = previewResponseExampleValue()
+  if (example !== undefined) {
+    if (responseUnpackEnabled.value) {
+      const source = responseUnpackSource.value.replace(/^body\.?/, '')
+      if (previewNestedValue(example, source) === undefined) return previewResponseEnvelopeValue(example)
+    }
+    return example
+  }
+  const payload = previewResponsePayloadValue()
+  return responseUnpackEnabled.value ? previewResponseEnvelopeValue(payload) : payload
 }
 
 function previewResponseStatusCode() {
@@ -501,12 +580,17 @@ function buildRequestPreview() {
 function buildResponsePreview() {
   const statusCode = previewResponseStatusCode()
   const accept = requestSchemaAccept.value || 'application/json'
-  return [
+  const lines = [
     `${statusCode} ${previewResponseReason(statusCode)}`,
     `Content-Type: ${accept}`,
     '',
+    'BODY',
     formatPreviewBody(previewResponseBodyValue()),
-  ].join('\n')
+  ]
+  if (responseUnpackEnabled.value) {
+    lines.push('', 'UNPACKED DATA (response.payload)', formatPreviewBody(previewResponsePayloadValue()))
+  }
+  return lines.join('\n')
 }
 
 function buildTemplatePreview() {
@@ -525,16 +609,15 @@ function buildTemplatePreview() {
 function defaultSuccessContract(protocol: 'http' | 'ws') {
   return protocol === 'ws'
     ? { messages: { min: 1 }, body_schema: {} }
-    : {
-        status_codes: { min: 200, max: 299 },
-        body_schema: {
-          type: 'object', required: ['code', 'data'], properties: { code: { const: 0 } },
-        },
-      }
+    : { status_codes: { min: 200, max: 299 }, body_schema: {} }
 }
 
 function defaultResponseSchema(protocol: 'http' | 'ws') {
-  return protocol === 'http' ? defaultSuccessContract('http').body_schema : {}
+  return protocol === 'http' ? { type: 'object', properties: {}, required: [] } : {}
+}
+
+function defaultResponseUnpack(protocol: 'http' | 'ws') {
+  return protocol === 'http' ? { enabled: false, source: 'body.data' } : {}
 }
 
 function defaultTemplateRequest(protocol: 'http' | 'ws') {
@@ -735,7 +818,7 @@ function requestSchemaFor(definition: ApiDefinition) {
   return schema
 }
 
-function responseSchemaFor(definition: ApiDefinition) {
+function rawResponseSchemaFor(definition: ApiDefinition) {
   if (definition.response_schema && typeof definition.response_schema === 'object'
     && Object.keys(definition.response_schema).length)
     return { ...definition.response_schema }
@@ -743,6 +826,39 @@ function responseSchemaFor(definition: ApiDefinition) {
   return schema && typeof schema === 'object' && !Array.isArray(schema)
     ? { ...schema as Record<string, unknown> }
     : {}
+}
+
+function responseDataSchema(schema: Record<string, unknown>) {
+  const properties = schema.properties
+  if (schema.type !== 'object' || !isRecord(properties) || !isRecord(properties.data)) return null
+  const code = properties.code
+  const required = Array.isArray(schema.required) ? schema.required.map(String) : []
+  const hasSuccessSignal = isRecord(code)
+    && ('const' in code || Array.isArray(code.enum))
+  if (!(required.includes('code') && required.includes('data')) && !hasSuccessSignal) return null
+  return properties.data
+}
+
+function responseUnpackFor(definition: ApiDefinition) {
+  const configured = definition.response_unpack && typeof definition.response_unpack === 'object'
+    ? { ...definition.response_unpack }
+    : {}
+  if (configured.enabled === true) {
+    if (typeof configured.source !== 'string' || !configured.source.trim()) configured.source = 'body.data'
+    return configured
+  }
+  const legacySchema = rawResponseSchemaFor(definition)
+  if (definition.protocol === 'http' && responseDataSchema(legacySchema)) {
+    return { enabled: true, source: 'body.data', envelope_schema: legacySchema }
+  }
+  return defaultResponseUnpack(definition.protocol)
+}
+
+function responseSchemaFor(definition: ApiDefinition) {
+  const schema = rawResponseSchemaFor(definition)
+  const unpack = responseUnpackFor(definition)
+  if (unpack.enabled === true && unpack.source === 'body.data') return responseDataSchema(schema) || schema
+  return schema
 }
 
 function requestTarget(definition: ApiDefinition) {
@@ -766,7 +882,7 @@ function effectiveParameterCount(definition: ApiDefinition) {
 function openCreate() {
   if (!projectId.value) { ElMessage.warning('请先选择项目'); return }
   editingId.value = ''
-  Object.assign(form, { key: '', name: '', protocol: 'http', template_id: null, success_assertion_id: undefined, description: '', request: pretty(defaultRequest('http')), request_schema: pretty(defaultRequestSchema('http')), response_schema: pretty(defaultResponseSchema('http')), parameters: '[]', examples: '[]', success_contract: pretty(defaultSuccessContract('http')), response_variants: '[]' })
+  Object.assign(form, { key: '', name: '', protocol: 'http', template_id: null, success_assertion_id: undefined, description: '', request: pretty(defaultRequest('http')), request_schema: pretty(defaultRequestSchema('http')), response_schema: pretty(defaultResponseSchema('http')), response_unpack: pretty(defaultResponseUnpack('http')), parameters: '[]', examples: '[]', success_contract: pretty(defaultSuccessContract('http')), response_variants: '[]' })
   editorMode.value = 'visual'
   editorConfigTab.value = 'request'
   requestPreviewOpen.value = false
@@ -777,7 +893,7 @@ function openCreate() {
 
 function openEdit(row: ApiDefinition) {
   editingId.value = row.id
-  Object.assign(form, { key: row.key, name: row.name, protocol: row.protocol, template_id: row.template_id, success_assertion_id: row.success_assertion_id, description: row.description, request: pretty(row.request), request_schema: pretty(requestSchemaFor(row)), response_schema: pretty(responseSchemaFor(row)), parameters: pretty(row.parameters), examples: pretty(row.examples), success_contract: pretty(Object.keys(row.success_contract || {}).length ? row.success_contract : defaultSuccessContract(row.protocol)), response_variants: pretty(row.response_variants) })
+  Object.assign(form, { key: row.key, name: row.name, protocol: row.protocol, template_id: row.template_id, success_assertion_id: row.success_assertion_id, description: row.description, request: pretty(row.request), request_schema: pretty(requestSchemaFor(row)), response_schema: pretty(responseSchemaFor(row)), response_unpack: pretty(responseUnpackFor(row)), parameters: pretty(row.parameters), examples: pretty(row.examples), success_contract: pretty(Object.keys(row.success_contract || {}).length ? row.success_contract : defaultSuccessContract(row.protocol)), response_variants: pretty(row.response_variants) })
   editorMode.value = 'visual'
   editorConfigTab.value = 'request'
   requestPreviewOpen.value = false
@@ -792,6 +908,7 @@ function switchProtocol(protocol: 'http' | 'ws') {
   form.success_assertion_id = undefined
   form.request_schema = pretty(defaultRequestSchema(protocol))
   form.response_schema = pretty(defaultResponseSchema(protocol))
+  form.response_unpack = pretty(defaultResponseUnpack(protocol))
   if (!editingId.value) {
     form.request = pretty(defaultRequest(protocol))
     form.success_contract = pretty(defaultSuccessContract(protocol))
@@ -810,6 +927,7 @@ function selectTemplate(templateId: string | null) {
       : { path: '/', messages: [{ type: 'ping' }], receive_count: 1 })
     form.request_schema = pretty(defaultRequestSchema(template.protocol))
     form.response_schema = pretty(defaultResponseSchema(template.protocol))
+    form.response_unpack = pretty(defaultResponseUnpack(template.protocol))
   }
   syncPathParameters(parsePathParameterNames(requestAddress.value))
 }
@@ -830,6 +948,7 @@ function advancedConfig() {
     request_schema: parse(form.request_schema),
     parameters: parse(form.parameters),
     response_schema: parse(form.response_schema),
+    response_unpack: parse(form.response_unpack),
     success_contract: parse(form.success_contract),
     response_variants: parse(form.response_variants),
     examples: parse(form.examples),
@@ -860,6 +979,9 @@ function applyAdvancedDraft() {
     form.request_schema = pretty(value.request_schema && typeof value.request_schema === 'object' ? value.request_schema : {})
     form.parameters = pretty(Array.isArray(value.parameters) ? value.parameters : [])
     form.response_schema = pretty(value.response_schema && typeof value.response_schema === 'object' ? value.response_schema : {})
+    form.response_unpack = pretty(value.response_unpack && typeof value.response_unpack === 'object'
+      ? value.response_unpack
+      : defaultResponseUnpack(form.protocol))
     form.success_contract = pretty(value.success_contract && typeof value.success_contract === 'object' ? value.success_contract : {})
     form.response_variants = pretty(Array.isArray(value.response_variants) ? value.response_variants : [])
     form.examples = pretty(Array.isArray(value.examples) ? value.examples : [])
@@ -920,6 +1042,7 @@ async function save() {
     const requestSchema = parseJson<Record<string, unknown>>(form.request_schema, '请求 Schema')
     const request = parseJson<Record<string, unknown>>(form.request, '请求配置')
     const responseSchema = parseJson<Record<string, unknown>>(form.response_schema, '响应 Schema')
+    const responseUnpack = parseJson<Record<string, unknown>>(form.response_unpack, '响应解包配置')
     const successContract = parseJson<Record<string, unknown>>(form.success_contract, '成功契约')
     if (form.protocol === 'http' && typeof requestSchema.accept === 'string') {
       const accept = requestSchema.accept.trim()
@@ -940,6 +1063,7 @@ async function save() {
       request,
       request_schema: requestSchema,
       response_schema: responseSchema,
+      response_unpack: responseUnpack,
       parameters: parseJson<Record<string, unknown>[]>(form.parameters, '参数说明'),
       examples: parseJson<Record<string, unknown>[]>(form.examples, '参考案例'),
       success_contract: Object.keys(responseSchema).length
@@ -1215,31 +1339,55 @@ watch(apiSearch, () => { apiPage.value = 1 })
             <el-tab-pane label="响应配置" name="response">
               <section class="api-editor-section api-editor-section-response">
                 <div class="api-section-heading api-section-heading-with-meta"><span class="api-section-index">03</span><div><h3>响应配置</h3><p>配置响应媒体类型、成功条件和响应字段结构。</p></div></div>
-                <div class="response-config-meta">
-                  <el-form-item v-if="form.protocol === 'http'" label="响应媒体类型（Accept）" class="response-accept-field">
-                    <el-select
-                      v-model="requestSchemaAccept"
-                      class="response-accept-select"
-                      filterable
-                      allow-create
-                      clearable
-                      default-first-option
-                      popper-class="response-accept-popper"
-                      placeholder="选择或输入媒体类型"
-                    >
-                      <el-option v-for="option in commonAcceptOptions" :key="option.value" :label="option.value" :value="option.value">
-                        <span>{{ option.label }}</span><code>{{ option.value }}</code>
-                      </el-option>
-                    </el-select>
-                  </el-form-item>
-                  <el-form-item label="成功条件" class="response-success-assertion-field">
-                    <el-select v-model="form.success_assertion_id" clearable placeholder="选择一个成功条件">
-                      <el-option v-for="item in assertions" :key="item.id" :label="item.name" :value="item.id">
-                        <span>{{ item.name }}</span><code class="select-option-key">{{ item.key }}</code>
-                      </el-option>
-                    </el-select>
-                    <div class="muted">API 只执行这一个成功条件；未选择时保留历史成功契约兼容逻辑。</div>
-                  </el-form-item>
+                <div :class="['response-config-grid', { 'is-http': form.protocol === 'http' }]">
+                  <div class="response-contract-card">
+                    <div class="response-config-card-heading"><strong>响应契约</strong><span>类型与判定</span></div>
+                    <div class="response-config-fields">
+                      <el-form-item v-if="form.protocol === 'http'" label="响应媒体类型（Accept）" class="response-accept-field">
+                        <el-select
+                          v-model="requestSchemaAccept"
+                          class="response-accept-select"
+                          filterable
+                          allow-create
+                          clearable
+                          default-first-option
+                          popper-class="response-accept-popper"
+                          placeholder="选择或输入媒体类型"
+                        >
+                          <el-option v-for="option in commonAcceptOptions" :key="option.value" :label="option.value" :value="option.value">
+                            <span>{{ option.label }}</span><code>{{ option.value }}</code>
+                          </el-option>
+                        </el-select>
+                      </el-form-item>
+                      <el-form-item label="成功条件" class="response-success-assertion-field">
+                        <el-select v-model="form.success_assertion_id" clearable placeholder="选择一个成功条件">
+                          <el-option v-for="item in assertions" :key="item.id" :label="item.name" :value="item.id">
+                            <span>{{ item.name }}</span><code class="select-option-key">{{ item.key }}</code>
+                          </el-option>
+                        </el-select>
+                        <div class="muted">API 只执行这一个成功条件；未选择时保留历史成功契约兼容逻辑。</div>
+                      </el-form-item>
+                    </div>
+                  </div>
+                  <div v-if="form.protocol === 'http'" class="response-unpack-panel">
+                    <div class="response-unpack-heading">
+                      <div>
+                        <strong>响应解包</strong>
+                        <p>保留原始 body，按路径提取 payload；响应字段按解包后的数据填写。</p>
+                      </div>
+                      <el-switch v-model="responseUnpackEnabled" active-text="启用" inactive-text="关闭" />
+                    </div>
+                    <div v-if="responseUnpackEnabled" class="response-unpack-controls">
+                      <el-form-item label="解包路径">
+                        <el-select v-model="responseUnpackSource" filterable allow-create default-first-option placeholder="例如：body.data">
+                          <el-option label="响应体 data" value="body.data" />
+                          <el-option label="响应体 result" value="body.result" />
+                          <el-option label="响应体 payload" value="body.payload" />
+                        </el-select>
+                      </el-form-item>
+                      <div class="response-unpack-flow"><code>response.body</code><span>→</span><code>response.payload</code></div>
+                    </div>
+                  </div>
                 </div>
                 <ApiResponseFieldsEditor :model-value="responseSchemaConfig" @update:model-value="updateResponseSchema" />
               </section>

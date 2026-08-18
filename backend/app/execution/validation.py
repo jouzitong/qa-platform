@@ -48,6 +48,7 @@ def validate_api_response(
 ) -> dict[str, Any]:
     variant: dict[str, Any] | None = None
     rules: list[dict[str, Any]] = []
+    response_unpack = api.response_unpack if isinstance(api.response_unpack, dict) else {}
 
     # A directly linked success condition is the source of truth.
     # Keep success_contract only as a compatibility fallback for older APIs.
@@ -58,7 +59,9 @@ def validate_api_response(
             )
         )
     elif api.success_contract:
-        rules.extend(_success_contract_rules(api.protocol, api.success_contract))
+        rules.extend(
+            _success_contract_rules(api.protocol, api.success_contract, response_unpack)
+        )
     else:
         # Legacy response variants remain readable for existing projects.
         variant, match_error = _select_variant(api.response_variants, request, response, context)
@@ -91,7 +94,10 @@ def validate_api_response(
                     "assertion_id": f"variant:{variant.get('name', 'unnamed')}:schema",
                     "name": f"{variant.get('name', '成功响应')} JSON Schema",
                     "engine": "json_schema",
-                    "config": {"source": "body", "schema": variant["schema"]},
+                    "config": {
+                        "source": "payload" if response_unpack.get("enabled") else "body",
+                        "schema": variant["schema"],
+                    },
                     "severity": "success",
                 }
             )
@@ -135,7 +141,9 @@ def validate_api_response(
 
 
 def _success_contract_rules(
-    protocol: str, contract: dict[str, Any]
+    protocol: str,
+    contract: dict[str, Any],
+    response_unpack: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     rules: list[dict[str, Any]] = []
     if protocol == "http":
@@ -174,12 +182,13 @@ def _success_contract_rules(
         )
     schema = contract.get("body_schema")
     if schema:
+        source = "payload" if isinstance(response_unpack, dict) and response_unpack.get("enabled") else "body"
         rules.append(
             {
                 "assertion_id": "system:success-body-schema",
                 "name": "成功响应体结构",
                 "engine": "json_schema",
-                "config": {"source": "body", "schema": schema},
+                "config": {"source": source, "schema": schema},
                 "severity": "success",
                 "message": "响应体不符合成功契约定义",
                 "mandatory": True,

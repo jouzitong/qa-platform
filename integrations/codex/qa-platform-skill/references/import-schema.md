@@ -74,6 +74,7 @@ The scanner emits an authoritative multi-file scan bundle and a compatibility JS
     "ws": []
   },
   "api_templates": [],
+  "api_template_discovery": {"enabled": true},
   "assertion_definitions": [],
   "success_assertions": {
     "source": "project_config",
@@ -145,6 +146,7 @@ Every interface should include:
   "parameters": [],
   "request_schema": {"accept": "application/json", "schema": {}},
   "response_schema": {},
+  "response_unpack": {},
   "success_assertion_key": "config:http-success-status",
   "auth": "unknown",
   "tags": [],
@@ -160,6 +162,36 @@ Every interface should include:
 Use `protocol: "ws"` for WebSocket records. A WS record may use `url` instead of `path` and may include `handshake`, `messages`, and `receive_count`.
 
 Do not place live authorization headers, cookies, passwords, or tokens in request examples. Use variable references or empty values.
+
+### Logical response payload and envelope
+
+For a documented HTTP response wrapper such as `{code, data}`, the interface keeps the raw wire contract separate from the fields that test authors configure:
+
+```json
+{
+  "response_schema": {
+    "type": "object",
+    "required": ["id"],
+    "properties": {
+      "id": {"type": "string", "description": "Resource ID.", "example": "u001"}
+    }
+  },
+  "response_unpack": {
+    "enabled": true,
+    "source": "body.data",
+    "envelope_schema": {
+      "type": "object",
+      "required": ["code", "data"],
+      "properties": {
+        "code": {"type": "integer", "const": 0, "description": "Business result code.", "example": 0},
+        "data": {"$ref": "#/logical-response-schema"}
+      }
+    }
+  }
+}
+```
+
+`response_schema` is the schema of the extracted logical payload. `response_unpack.source` must be an HTTP response path rooted at `body` (for example `body.data`, `body.result`, or `body.payload`). The executor preserves `response.body` and attaches `response.payload`; schema assertions and extractors configured for the logical response read `payload`. If unpacking is disabled or omitted for a historical API, `payload` equals `body`. A missing configured path is an execution failure. Only strong wrapper evidence may enable this conversion: both `code` and `data` are required, or `code` has a documented `const`/`enum`.
 
 ## Executable parameter contract
 
@@ -225,11 +257,14 @@ Each configured default must reference a definition in the same config. During s
       "examples": [],
       "match": {"methods": ["POST", "PUT"], "path_prefix": "/api/orders"}
     }
-  ]
+  ],
+  "api_template_discovery": {"enabled": true}
 }
 ```
 
-Template `match` supports `protocol`, `method`/`methods`, `key`/`keys`, `path`/`paths`, `path_prefix`, `path_regex`, and `tags`. All specified constraints must match. If multiple templates match, configuration order wins and the API receives a warning. The archive imports template records before APIs and resolves API `template_key` references by template key/name.
+Explicit `api_templates` take precedence. If the list is empty and `api_template_discovery.enabled` is true (the default), the scanner can discover safe defaults from a shared frontend request-header builder and Spring gateway security configuration. It emits variable references such as `{{ access_token }}`, `{{ random.uuid(32) }}`, and `{{ frontend_environment }}`; it never copies tokens, signing secrets, cookies, or other runtime credentials. A discovered gateway-auth template is ordered before the public frontend fallback and carries the configured `ignore-urls` as exclusions.
+
+Template `match` supports `protocol`, `method`/`methods`, `key`/`keys`, `path`/`paths`, `path_prefix`, `path_regex`, `tags`, `exclude_paths` (glob patterns), `exclude_path_prefixes`, and `exclude_path_regex`. All specified positive constraints must match and any exclusion prevents a match. If multiple templates match, configuration order wins and the API receives a warning. The archive imports template records before APIs and resolves API `template_key` references by template key/name. A project with no explicit or statically discovered template receives a warning rather than an empty, silent assumption.
 
 ## Flow documents
 

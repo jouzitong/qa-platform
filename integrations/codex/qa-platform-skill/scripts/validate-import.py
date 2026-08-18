@@ -18,6 +18,7 @@ SECRET_RE = re.compile(
 )
 PARAMETER_LOCATIONS = {"path", "query", "header", "body"}
 PARAMETER_TYPES = {"string", "integer", "number", "boolean", "object", "array"}
+RESPONSE_PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 def parse_args() -> argparse.Namespace:
@@ -173,6 +174,34 @@ def validate_response_schema_fields(value: Any, path: str, errors: list[str]) ->
                     validate_response_schema_fields(
                         branch, f"{path}.{keyword}[{index}]", errors
                     )
+
+
+def validate_response_unpack(
+    value: Any, path: str, protocol: str, errors: list[str]
+) -> None:
+    if value in (None, {}):
+        return
+    if not isinstance(value, dict):
+        add_error(errors, f"{path} must be an object")
+        return
+    enabled = value.get("enabled", False)
+    if not isinstance(enabled, bool):
+        add_error(errors, f"{path}.enabled must be boolean")
+        return
+    if not enabled:
+        return
+    if protocol != "http":
+        add_error(errors, f"{path} is only supported for HTTP interfaces")
+    source = value.get("source")
+    segments = str(source or "").strip().split(".")
+    if (
+        segments[0] != "body"
+        or any(
+            not segment or not RESPONSE_PATH_SEGMENT_RE.fullmatch(segment)
+            for segment in segments
+        )
+    ):
+        add_error(errors, f"{path}.source must be a dot path rooted at body")
 
 
 def walk_secrets(value: Any, path: str, findings: list[str]) -> None:
@@ -370,6 +399,12 @@ def validate(manifest: Any) -> tuple[list[str], list[str]]:
                 validate_response_schema_fields(
                     response_schema, f"{path}.response_schema", errors
                 )
+            validate_response_unpack(
+                item.get("response_unpack", {}),
+                f"{path}.response_unpack",
+                protocol,
+                errors,
+            )
             assertion_key = item.get("success_assertion_key")
             if not isinstance(assertion_key, str) or not assertion_key.strip():
                 add_error(errors, f"{path}.success_assertion_key must be a non-empty string")

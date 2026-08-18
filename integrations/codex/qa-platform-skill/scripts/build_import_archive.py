@@ -175,6 +175,11 @@ def convert_interface(interface: dict[str, Any]) -> dict[str, Any]:
             if isinstance(interface.get("response_schema"), dict)
             else {}
         ),
+        "response_unpack": (
+            deepcopy(interface.get("response_unpack"))
+            if isinstance(interface.get("response_unpack"), dict)
+            else {}
+        ),
         "parameters": interface.get("parameters") if isinstance(interface.get("parameters"), list) else [],
         "examples": [],
         "success_contract": response_contract(interface, protocol),

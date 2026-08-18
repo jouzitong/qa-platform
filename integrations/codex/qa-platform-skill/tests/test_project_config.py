@@ -65,6 +65,7 @@ class ProjectConfigTests(unittest.TestCase):
             self.assertEqual(config["project"]["name"], root.name)
             self.assertEqual(config["variables"], {"base_url": "127.0.0.1:9764"})
             self.assertEqual(config["api_templates"], [])
+            self.assertEqual(config["api_template_discovery"], {"enabled": True})
             self.assertEqual(config["flow_documents"], [])
             self.assertTrue(config["openapi"]["auto_discover"])
             self.assertFalse(config["openapi"]["runtime_discovery"]["enabled"])

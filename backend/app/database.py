@@ -121,6 +121,10 @@ def ensure_schema_compatibility() -> None:
             connection.exec_driver_sql(
                 "ALTER TABLE api_definitions ADD COLUMN response_schema JSON DEFAULT '{}'"
             )
+        if "response_unpack" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE api_definitions ADD COLUMN response_unpack JSON DEFAULT '{}'"
+            )
         if "api_templates" in inspector.get_table_names():
             template_columns = {
                 column["name"] for column in inspector.get_columns("api_templates")

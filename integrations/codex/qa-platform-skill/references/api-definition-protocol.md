@@ -82,6 +82,28 @@ qa-platform 执行四类请求位置；参数树的根节点使用 `in`，`objec
 }
 ```
 
+### 响应解包
+
+绝大多数项目会把业务数据包在 `{code, data}` 中，但扫描器只有在标准文档或源码明确证明包装关系时才启用解包：`code` 与 `data` 同时出现在 `required`，或 `code` 具有明确的 `const`/`enum`。启用后，`response_schema` 只描述 `data` 内部的逻辑字段，原始包装 Schema 放入 `response_unpack.envelope_schema`：
+
+```json
+{
+  "response_schema": {
+    "type": "object",
+    "properties": {
+      "id": {"type": "string", "description": "资源 ID。", "example": "u001"}
+    }
+  },
+  "response_unpack": {
+    "enabled": true,
+    "source": "body.data",
+    "envelope_schema": {"type": "object", "required": ["code", "data"]}
+  }
+}
+```
+
+执行器保留原始 `response.body`，并增加解包后的 `response.payload`；响应 Schema 断言、响应字段编辑和提取器在启用解包时都针对 `payload`。解包路径必须是 `body` 根下的点路径，路径不存在时执行失败；禁止退回到另一个未解包值。未启用解包的历史 API 仍会得到 `payload == body`，因此不会破坏旧断言和运行快照。WebSocket 不使用此配置。
+
 嵌套对象示例：
 
 ```json
@@ -133,6 +155,8 @@ qa-platform 执行四类请求位置；参数树的根节点使用 `in`，`objec
 `required = false` 或 `Optional<T>` 生成非必填参数；`defaultValue` 生成 `default` 并使该参数非必填。Java `String`、整数包装类型、浮点类型、布尔类型、集合、Map 和数组映射到六个规范类型。`@NotNull`、`@NotBlank`、`@NotEmpty` 标记 DTO 字段必填；`@Size`、`@Min`、`@Max`、`@Pattern`、`@Schema` / `@Parameter` 的可读元数据会尽可能保留。
 
 DTO 解析是静态、保守的：支持类、嵌套类和 record 的字段，并对索引到的嵌套 DTO 递归生成 `children`；循环引用在当前可解析边界停止。未知 DTO、Map、根数组或标量 body 不生成虚假的顶层字段，而是添加警告。`MultipartFile` / `Part` 不生成可执行参数，因为当前运行时只发送 JSON。
+
+JavaDoc 必须先从字段声明中剥离再解析 Java 类型；字段 JavaDoc 会作为该字段的 `description`。枚举声明映射为 `type: "string"` 并保留 `enum`，不能因为字段引用被初始识别为 object 就丢失枚举类型。没有 OpenAPI/Swagger 响应契约时，Spring Mapping 方法的返回类型是次级响应来源：解包 `ResponseEntity<T>`、`Optional<T>` 等容器，递归展开 DTO；常见 `R<T>`、`Result<T>`、`ApiResponse<T>` 包装按 `code`/`data` 生成可审阅响应结构，并在接口 `warnings` 中保留这是源码约定推断的事实。无泛型包装的 `R` 只生成 object 型 `data` 占位，不伪造业务字段。
 
 ### 其他框架与 WebSocket
 

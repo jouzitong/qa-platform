@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from copy import deepcopy
+import re
 from typing import Any
 
 from sqlalchemy import select
@@ -55,6 +56,7 @@ COLLECTIONS: tuple[tuple[str, type[Any], str, tuple[str, ...]], ...] = (
             "request",
             "request_schema",
             "response_schema",
+            "response_unpack",
             "parameters",
             "examples",
             "success_contract",
@@ -99,6 +101,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "request": {},
         "request_schema": {},
         "response_schema": {},
+        "response_unpack": {},
         "parameters": [],
         "examples": [],
         "success_contract": {},
@@ -108,11 +111,48 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     "test_plans": {"version": "v1.0.0", "description": "", "items": []},
 }
 
+RESPONSE_PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
 
 def _value(record: dict[str, Any], collection: str, field: str) -> Any:
     if field in record:
         return record[field]
     return deepcopy(DEFAULTS.get(collection, {}).get(field))
+
+
+def _normalize_response_unpack(
+    protocol: str, value: Any, errors: list[str], key: str
+) -> dict[str, Any]:
+    if value in (None, {}):
+        return {}
+    if not isinstance(value, dict):
+        errors.append(f"API {key} 的 response_unpack 必须是对象")
+        return {}
+    enabled = value.get("enabled", False)
+    if not isinstance(enabled, bool):
+        errors.append(f"API {key} 的 response_unpack.enabled 必须是布尔值")
+        return {}
+    if not enabled:
+        return {"enabled": False}
+    if protocol != "http":
+        errors.append(f"API {key} 只有 HTTP 协议支持 response_unpack")
+        return {"enabled": False}
+    source = value.get("source")
+    segments = str(source or "").strip().split(".")
+    if (
+        segments[0] != "body"
+        or any(
+            not segment or not RESPONSE_PATH_SEGMENT_RE.fullmatch(segment)
+            for segment in segments
+        )
+    ):
+        errors.append(f"API {key} 的 response_unpack.source 必须是 body 根路径下的点路径")
+        return {"enabled": False}
+    normalized = {"enabled": True, "source": ".".join(segments)}
+    envelope_schema = value.get("envelope_schema")
+    if isinstance(envelope_schema, dict) and envelope_schema:
+        normalized["envelope_schema"] = deepcopy(envelope_schema)
+    return normalized
 
 
 def _identity(record: dict[str, Any], identity_field: str, fallback: str = "") -> str:
@@ -405,6 +445,12 @@ def _incoming_payload(
         if field not in {"template_id", "success_assertion_id", "steps", "items"}
     }
     if collection == "apis":
+        payload["response_unpack"] = _normalize_response_unpack(
+            str(payload.get("protocol") or "http"),
+            payload.get("response_unpack"),
+            errors,
+            str(record.get("key") or record.get("name") or "未命名 API"),
+        )
         template_value = next(
             (
                 record.get(field)

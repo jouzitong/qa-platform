@@ -36,6 +36,11 @@ def make_archive(*, name: str = "imported-project", api_name: str = "健康检�
                         "accept": "application/vnd.health+json",
                         "schema": {"type": "object", "required": ["status"]},
                     },
+                    "response_schema": {
+                        "type": "object",
+                        "properties": {"status": {"type": "string", "example": "ok"}},
+                    },
+                    "response_unpack": {"enabled": True, "source": "body.data"},
                 }
             ],
             ensure_ascii=False,
@@ -113,6 +118,8 @@ def test_import_preview_requires_approval_and_applies_assets_atomically() -> Non
         assert apis[0]["request"]["headers"]["Accept"] == "application/vnd.health+json"
         assert apis[0]["request_schema"]["accept"] == "application/vnd.health+json"
         assert apis[0]["request_schema"]["schema"]["required"] == ["status"]
+        assert apis[0]["response_unpack"] == {"enabled": True, "source": "body.data"}
+        assert apis[0]["response_schema"]["properties"]["status"]["example"] == "ok"
         assert flows[0]["steps"][0]["api_id"] == apis[0]["id"]
         assert plans[0]["items"][0]["target_id"] == apis[0]["id"]
         assertion = client.get(f"/api/v1/assertion-definitions?project_id={project['id']}").json()[

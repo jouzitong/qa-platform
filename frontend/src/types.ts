@@ -52,6 +52,7 @@ export interface ApiDefinition {
   request: Record<string, unknown>
   request_schema: Record<string, unknown>
   response_schema: Record<string, unknown>
+  response_unpack?: Record<string, unknown>
   parameters: Record<string, unknown>[]
   examples: Record<string, unknown>[]
   success_contract: Record<string, unknown>

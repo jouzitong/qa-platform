@@ -1,4 +1,4 @@
 interface:
   display_name: "QA Platform Scanner"
   short_description: "稳定扫描 API、读取流程文档并生成模块化导入包"
-  default_prompt: "Use $qa-platform-skill to deterministically convert OpenAPI/Swagger contracts into complete executable definitions with recursive object fields, scan remaining HTTP/WS routes, read configured flow documents, refine draft flow modules, validate the module directory, and build a versioned qa-platform ZIP."
+  default_prompt: "Use $qa-platform-skill to deterministically convert OpenAPI/Swagger contracts into complete executable definitions with recursive object fields and response schemas, discover safe reusable API templates from project request/gateway configuration, scan remaining HTTP/WS routes, read configured flow documents, refine draft flow modules, validate the module directory, and build a versioned qa-platform ZIP."

@@ -130,6 +130,11 @@ def discover_success_code_values(
 def _body_schema(interface: dict[str, Any], success_code: Any | None) -> dict[str, Any]:
     raw_schema = interface.get("response_schema")
     schema = deepcopy(raw_schema) if isinstance(raw_schema, dict) and raw_schema else {}
+    if (
+        isinstance(interface.get("response_unpack"), dict)
+        and interface["response_unpack"].get("enabled")
+    ):
+        return schema
     has_explicit_schema = bool(schema)
     if not schema:
         schema = deepcopy(DEFAULT_SUCCESS_BODY_SCHEMA)

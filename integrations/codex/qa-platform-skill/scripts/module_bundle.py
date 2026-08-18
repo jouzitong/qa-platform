@@ -136,6 +136,7 @@ def bundle_index(manifest: dict[str, Any]) -> dict[str, Any]:
         "source": deepcopy(manifest.get("source") or {}),
         "architecture": deepcopy(manifest.get("architecture") or {}),
         "import_decision": deepcopy(manifest.get("import_decision") or {}),
+        "api_template_discovery": deepcopy(manifest.get("api_template_discovery") or {}),
         "success_assertions": deepcopy(manifest.get("success_assertions") or {}),
         "warnings": deepcopy(manifest.get("warnings") or []),
         "modules": deepcopy(MODULE_FILES),
@@ -245,6 +246,7 @@ def load_module_bundle(directory: Path) -> dict[str, Any]:
         ),
         "architecture": deepcopy(index.get("architecture") or {}),
         "import_decision": deepcopy(index.get("import_decision") or {}),
+        "api_template_discovery": deepcopy(index.get("api_template_discovery") or {}),
         "warnings": [str(item) for item in index.get("warnings", [])]
         if isinstance(index.get("warnings", []), list)
         else [],

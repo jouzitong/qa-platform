@@ -824,6 +824,193 @@ spring:
             imported_order = next(item for item in assets if item["key"] == order_post["key"])
             self.assertEqual(imported_order["parameters"], order_post["parameters"])
 
+    def test_spring_java_dto_request_and_response_contracts_recurse_and_preserve_enum(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / ".qa-platform.json").write_text(
+                json.dumps({"variables": {"base_url": "127.0.0.1:9764"}}),
+                encoding="utf-8",
+            )
+            (root / "DemoController.java").write_text(
+                """
+                import org.springframework.web.bind.annotation.*;
+
+                @RestController
+                @RequestMapping("/demo")
+                public class DemoController {
+                    @PostMapping("/items")
+                    public R<DemoResponse> create(@RequestBody DemoRequest request) {
+                        return null;
+                    }
+
+                    public static class DemoRequest {
+                        /** 请求状态。 */
+                        private DemoStatus status;
+                        /** 请求明细。 */
+                        private DemoChild child;
+                    }
+
+                    public static class DemoResponse {
+                        /** 响应状态。 */
+                        private DemoStatus status;
+                        /** 响应明细。 */
+                        private DemoChild child;
+                    }
+
+                    public static class DemoChild {
+                        /** 数量。 */
+                        private Integer count;
+                    }
+
+                    public enum DemoStatus { READY, FAILED }
+                }
+                """,
+                encoding="utf-8",
+            )
+            manifest_path = root / "manifest.json"
+            subprocess.run(
+                [sys.executable, str(SCAN), str(root), "--language", "zh-CN", "--output", str(manifest_path)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                [sys.executable, str(VALIDATE), str(manifest_path)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        api = next(item for item in manifest["interfaces"]["http"] if item["path"] == "/demo/items")
+        request_status = next(item for item in api["parameters"] if item["name"] == "status")
+        request_child = next(item for item in api["parameters"] if item["name"] == "child")
+        self.assertEqual(request_status["type"], "string")
+        self.assertEqual(request_status["enum"], ["READY", "FAILED"])
+        self.assertEqual(request_status["example"], "READY")
+        self.assertEqual(request_child["type"], "object")
+        self.assertEqual(request_child["children"][0]["name"], "count")
+        self.assertEqual(request_child["children"][0]["type"], "integer")
+
+        response = api["response_schema"]
+        self.assertEqual(api["request_schema"]["accept"], "application/json")
+        self.assertTrue(api["response_unpack"]["enabled"])
+        self.assertEqual(api["response_unpack"]["source"], "body.data")
+        self.assertEqual(response["properties"]["status"]["type"], "string")
+        self.assertEqual(response["properties"]["status"]["enum"], ["READY", "FAILED"])
+        self.assertEqual(
+            response["properties"]["child"]["properties"]["count"]["type"],
+            "integer",
+        )
+        for schema in (api["request_schema"]["schema"], response):
+            self.assertTrue(schema)
+
+    def test_static_api_template_discovery_reads_frontend_headers_and_gateway_exclusions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / ".qa-platform.json").write_text(
+                json.dumps({"variables": {"base_url": "127.0.0.1:9764"}}),
+                encoding="utf-8",
+            )
+            frontend = root / "src" / "api" / "request.ts"
+            frontend.parent.mkdir(parents=True)
+            frontend.write_text(
+                """
+                const TRACE_HEADER = 'X-Trace-Id';
+                const FRONTEND_ENVIRONMENT_HEADER = 'X-Frontend-Environment';
+                function buildRequestHeaders(token: string) {
+                    return {
+                        'Content-Type': 'application/json',
+                        Authorization: `Bearer ${token}`,
+                        [TRACE_HEADER]: generateTraceId(),
+                        [FRONTEND_ENVIRONMENT_HEADER]: FRONTEND_ENVIRONMENT,
+                    };
+                }
+                """,
+                encoding="utf-8",
+            )
+            gateway = root / "src" / "main" / "resources" / "application.yaml"
+            gateway.parent.mkdir(parents=True)
+            gateway.write_text(
+                """
+                gateway:
+                  security:
+                    enabled: true
+                    require-token: true
+                    header-name: Authorization
+                    token-prefix: Bearer
+                    ignore-urls:
+                      - /health/**
+                      - /user/auth/**
+                """,
+                encoding="utf-8",
+            )
+            controller = root / "DemoController.java"
+            controller.write_text(
+                """
+                import org.springframework.web.bind.annotation.*;
+                @RestController
+                public class DemoController {
+                    @GetMapping("/health") public String health() { return "ok"; }
+                    @GetMapping("/user/auth/login") public String login() { return "ok"; }
+                    @GetMapping("/api/items") public String items() { return "ok"; }
+                }
+                """,
+                encoding="utf-8",
+            )
+            manifest_path = root / "manifest.json"
+            subprocess.run(
+                [sys.executable, str(SCAN), str(root), "--language", "zh-CN", "--output", str(manifest_path)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        templates = {item["key"]: item for item in manifest["api_templates"]}
+        self.assertEqual(set(templates), {"scanner:frontend-http", "scanner:gateway-auth-http"})
+        auth_headers = templates["scanner:gateway-auth-http"]["request"]["headers"]
+        self.assertEqual(auth_headers["Authorization"], "Bearer {{ access_token }}")
+        self.assertEqual(auth_headers["X-Trace-Id"], "{{ random.uuid(32) }}")
+        self.assertEqual(auth_headers["X-Frontend-Environment"], "{{ frontend_environment }}")
+        template_text = json.dumps(templates, ensure_ascii=False)
+        self.assertNotIn("secret-token", template_text)
+        self.assertNotIn("signing_secret", template_text)
+        by_path = {item["path"]: item for item in manifest["interfaces"]["http"]}
+        self.assertEqual(by_path["/api/items"]["template_key"], "scanner:gateway-auth-http")
+        self.assertEqual(by_path["/health"]["template_key"], "scanner:frontend-http")
+        self.assertEqual(by_path["/user/auth/login"]["template_key"], "scanner:frontend-http")
+
+    def test_api_template_discovery_can_be_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / ".qa-platform.json").write_text(
+                json.dumps(
+                    {
+                        "variables": {"base_url": "127.0.0.1:9764"},
+                        "api_template_discovery": {"enabled": False},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (root / "app.py").write_text(
+                "from fastapi import FastAPI\napp = FastAPI()\n@app.get('/health')\ndef health(): return {}\n",
+                encoding="utf-8",
+            )
+            manifest_path = root / "manifest.json"
+            subprocess.run(
+                [sys.executable, str(SCAN), str(root), "--output", str(manifest_path)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["api_templates"], [])
+        self.assertIn(
+            "No reusable API template was configured or statically discovered",
+            "\n".join(manifest["warnings"]),
+        )
+
     def test_configured_success_assertions_are_exported_and_used_by_all_apis(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

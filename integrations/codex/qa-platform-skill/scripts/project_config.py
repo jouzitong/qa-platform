@@ -404,6 +404,20 @@ def normalize_api_templates(value: Any) -> list[dict[str, Any]]:
     return result
 
 
+def normalize_api_template_discovery(value: Any) -> dict[str, bool]:
+    """Normalize optional source-based API-template discovery settings."""
+    if value is None:
+        return {"enabled": True}
+    if isinstance(value, bool):
+        return {"enabled": value}
+    if not isinstance(value, dict):
+        raise SystemExit("qa-platform api_template_discovery must be an object or boolean")
+    enabled = value.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise SystemExit("qa-platform api_template_discovery.enabled must be boolean")
+    return {"enabled": enabled}
+
+
 def normalize_flow_documents(value: Any) -> list[dict[str, Any]]:
     """Normalize project documents that guide or define test flows."""
     if value is None:

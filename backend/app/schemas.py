@@ -56,6 +56,7 @@ class ApiCreate(BaseModel):
     request: dict[str, Any] = Field(default_factory=dict)
     request_schema: dict[str, Any] = Field(default_factory=dict)
     response_schema: dict[str, Any] = Field(default_factory=dict)
+    response_unpack: dict[str, Any] = Field(default_factory=dict)
     parameters: list[dict[str, Any]] = Field(default_factory=list)
     examples: list[dict[str, Any]] = Field(default_factory=list)
     success_contract: dict[str, Any] = Field(default_factory=default_success_contract)
@@ -72,6 +73,7 @@ class ApiUpdate(BaseModel):
     request: dict[str, Any] | None = None
     request_schema: dict[str, Any] | None = None
     response_schema: dict[str, Any] | None = None
+    response_unpack: dict[str, Any] | None = None
     parameters: list[dict[str, Any]] | None = None
     examples: list[dict[str, Any]] | None = None
     success_contract: dict[str, Any] | None = None

@@ -5,12 +5,60 @@ from sqlalchemy.orm import Session
 from app.database import Base
 from app.execution.plans import execute_plan
 from app.execution.protocols import ExecutionResult, _resolve_url
-from app.execution.runner import build_request_config, execute_flow
+from app.execution.response import ResponseUnpackError, attach_payload
+from app.execution.runner import build_request_config, execute_api_once, execute_flow
 from app.models import (
     ApiDefinition,
     ApiTemplate,
     Project,
 )
+
+
+def test_response_unpack_keeps_wire_body_and_exposes_payload() -> None:
+    response = attach_payload(
+        {"status_code": 200, "body": {"code": 0, "data": {"id": 1}}},
+        {"enabled": True, "source": "body.data"},
+    )
+
+    assert response["body"] == {"code": 0, "data": {"id": 1}}
+    assert response["payload"] == {"id": 1}
+    assert response["payload_source"] == "body.data"
+
+
+def test_response_unpack_reports_missing_path_and_legacy_payload_fallback() -> None:
+    with pytest.raises(ResponseUnpackError, match="响应解包路径不存在"):
+        attach_payload(
+            {"status_code": 200, "body": {"code": 0}},
+            {"enabled": True, "source": "body.data"},
+        )
+
+    response = attach_payload({"status_code": 200, "body": {"status": "ok"}}, {})
+    assert response["payload"] == response["body"]
+
+
+@pytest.mark.asyncio
+async def test_execute_api_once_attaches_unpacked_payload(monkeypatch) -> None:
+    api = ApiDefinition(
+        project_id="project",
+        key="wrapped",
+        name="wrapped",
+        protocol="http",
+        request={"method": "GET", "base_url": "https://example.test", "path": "/wrapped"},
+        response_unpack={"enabled": True, "source": "body.data"},
+        parameters=[],
+    )
+
+    async def fake_http(_config):
+        return ExecutionResult(
+            request={"path": "/wrapped"},
+            response={"status_code": 200, "body": {"code": 0, "data": {"ok": True}}},
+        )
+
+    monkeypatch.setattr("app.execution.runner.execute_http", fake_http)
+    result = await execute_api_once(api, {})
+
+    assert result.response["body"]["code"] == 0
+    assert result.response["payload"] == {"ok": True}
 from app.models import (
     TestFlow as FlowModel,
 )

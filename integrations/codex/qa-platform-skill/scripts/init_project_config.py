@@ -114,6 +114,7 @@ def main() -> int:
         "package_version": args.package_version,
         "storage": storage,
         "api_templates": [],
+        "api_template_discovery": {"enabled": True},
         "success_assertions": default_success_assertions(),
         "flow_documents": [
             {"path": path, "required": True} for path in args.flow_document
@@ -150,6 +151,7 @@ def main() -> int:
                 "storage": storage,
                 "success_assertions": config["success_assertions"],
                 "api_templates": config["api_templates"],
+                "api_template_discovery": config["api_template_discovery"],
                 "flow_documents": config["flow_documents"],
                 "openapi": config["openapi"],
             },

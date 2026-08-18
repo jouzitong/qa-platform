@@ -9,6 +9,7 @@ from app.execution.assertions import AssertionFailure, extract_values
 from app.execution.context import deep_merge, render, render_path_parameters
 from app.execution.events import run_events
 from app.execution.protocols import ExecutionResult, execute_http, execute_ws
+from app.execution.response import attach_payload
 from app.execution.validation import validate_api_response
 from app.models import ApiDefinition, ApiTemplate, Project, StepRun, TestFlow, TestRun, utcnow
 
@@ -224,9 +225,13 @@ async def execute_api_once(
 ) -> ExecutionResult:
     config = build_request_config(api, context, request_override, template)
     if api.protocol == "http":
-        return await execute_http(config)
+        result = await execute_http(config)
+        result.response = attach_payload(result.response, api.response_unpack)
+        return result
     if api.protocol == "ws":
-        return await execute_ws(config)
+        result = await execute_ws(config)
+        result.response = attach_payload(result.response, api.response_unpack)
+        return result
     raise ValueError(f"Unsupported protocol: {api.protocol}")
 
 

@@ -164,6 +164,58 @@ def test_asset_keys_are_unique_within_a_project() -> None:
         assert duplicate_flow.status_code == 409
 
 
+def test_response_unpack_round_trip_and_protocol_validation() -> None:
+    with TestClient(app) as client:
+        project = client.post(
+            "/api/v1/projects",
+            json={"name": "response-unpack-project", "variables": {"base_url": "127.0.0.1:8080"}},
+        ).json()
+        payload = {
+            "project_id": project["id"],
+            "key": "wrapped-health",
+            "name": "包装响应健康检查",
+            "protocol": "http",
+            "request": {"method": "GET", "path": "/health"},
+            "response_schema": {
+                "type": "object",
+                "properties": {"status": {"type": "string", "example": "ok"}},
+            },
+            "response_unpack": {"enabled": True, "source": "body.data"},
+        }
+        created = client.post("/api/v1/apis", json=payload)
+        assert created.status_code == 201
+        api = created.json()
+        assert api["response_unpack"] == {"enabled": True, "source": "body.data"}
+        assert api["response_schema"] == payload["response_schema"]
+        assert api["success_contract"]["body_schema"] == payload["response_schema"]
+
+        updated = client.patch(
+            f"/api/v1/apis/{api['id']}",
+            json={"response_unpack": {"enabled": False, "source": "body.data"}},
+        )
+        assert updated.status_code == 200
+        assert updated.json()["response_unpack"] == {"enabled": False}
+
+        ws = client.post(
+            "/api/v1/apis",
+            json={
+                "project_id": project["id"],
+                "key": "wrapped-events",
+                "name": "包装消息通道",
+                "protocol": "ws",
+                "request": {"url": "wss://example.test/events"},
+                "response_unpack": {"enabled": True, "source": "body.data"},
+            },
+        )
+        assert ws.status_code == 422
+
+        invalid = client.post(
+            "/api/v1/apis",
+            json={**payload, "key": "invalid-source", "response_unpack": {"enabled": True, "source": "payload.data"}},
+        )
+        assert invalid.status_code == 422
+
+
 def test_test_plan_round_trip_and_key_conflict() -> None:
     with TestClient(app) as client:
         project = client.post("/api/v1/projects", json={"name": "test-plan-project"}).json()

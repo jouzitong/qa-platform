@@ -1,3 +1,4 @@
+from copy import deepcopy
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
@@ -69,6 +70,64 @@ def _validate_response_schema(response_schema: dict[str, Any]) -> None:
         Draft202012Validator.check_schema(response_schema)
     except SchemaError as exc:
         raise HTTPException(status_code=422, detail=f"Response schema: {exc}") from None
+
+
+def _normalize_response_unpack(
+    protocol: str, response_unpack: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Validate the optional HTTP response envelope extraction contract."""
+    if response_unpack in (None, {}):
+        return {}
+    if not isinstance(response_unpack, dict):
+        raise HTTPException(status_code=422, detail="response_unpack must be an object")
+
+    enabled = response_unpack.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise HTTPException(status_code=422, detail="response_unpack.enabled must be boolean")
+    if not enabled:
+        return {"enabled": False}
+    if protocol != "http":
+        raise HTTPException(status_code=422, detail="response_unpack is only supported for HTTP APIs")
+
+    source = response_unpack.get("source")
+    if not isinstance(source, str) or not source.strip():
+        raise HTTPException(
+            status_code=422,
+            detail="response_unpack.source must be a non-empty response path",
+        )
+    normalized_source = source.strip()
+    segments = normalized_source.split(".")
+    if segments[0] != "body" or any(
+        not segment or not segment.replace("_", "").replace("-", "").isalnum()
+        for segment in segments
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="response_unpack.source must be a dot path rooted at response body",
+        )
+    normalized = {"enabled": True, "source": normalized_source}
+    envelope_schema = response_unpack.get("envelope_schema")
+    if isinstance(envelope_schema, dict) and envelope_schema:
+        _validate_response_schema(envelope_schema)
+        normalized["envelope_schema"] = deepcopy(envelope_schema)
+    return normalized
+
+
+def _response_schema_from_legacy_contract(
+    success_contract: dict[str, Any], response_unpack: dict[str, Any]
+) -> dict[str, Any]:
+    """Extract ``data`` from the former full-envelope schema when possible."""
+    if not response_unpack.get("enabled"):
+        return {}
+    source = str(response_unpack.get("source") or "")
+    if source != "body.data":
+        return {}
+    schema = success_contract.get("body_schema")
+    if not isinstance(schema, dict) or schema.get("type") != "object":
+        return {}
+    properties = schema.get("properties")
+    data_schema = properties.get("data") if isinstance(properties, dict) else None
+    return data_schema if isinstance(data_schema, dict) else {}
 
 
 def _validate_template(
@@ -158,13 +217,19 @@ def create_api(payload: ApiCreate, session: Session = Depends(get_session)) -> A
     )
     _validate_request_schema(payload.protocol, payload.request_schema)
     _validate_response_schema(payload.response_schema)
+    response_unpack = _normalize_response_unpack(payload.protocol, payload.response_unpack)
     _validate_variants(
         payload.response_variants
     )
     success_contract = payload.success_contract
     if payload.protocol == "ws" and "messages" not in success_contract:
         success_contract = default_success_contract("ws")
-    response_schema = payload.response_schema or success_contract.get("body_schema", {})
+    if payload.response_schema:
+        response_schema = payload.response_schema
+    elif response_unpack.get("enabled"):
+        response_schema = _response_schema_from_legacy_contract(success_contract, response_unpack)
+    else:
+        response_schema = success_contract.get("body_schema", {})
     _validate_response_schema(response_schema)
     if response_schema:
         success_contract = {**success_contract, "body_schema": response_schema}
@@ -174,6 +239,7 @@ def create_api(payload: ApiCreate, session: Session = Depends(get_session)) -> A
         values["request"] = _with_default_http_headers(payload.request, payload.request_schema)
     values["success_contract"] = success_contract
     values["response_schema"] = response_schema
+    values["response_unpack"] = response_unpack
     definition = ApiDefinition(
         **values,
         success_assertion_id=payload.success_assertion_id,
@@ -204,6 +270,10 @@ def update_api(
     _validate_success_assertion(session, definition.project_id, target_assertion_id)
     target_request_schema = values.get("request_schema", definition.request_schema)
     _validate_request_schema(target_protocol, target_request_schema)
+    target_response_unpack = _normalize_response_unpack(
+        target_protocol,
+        values.get("response_unpack", getattr(definition, "response_unpack", {})),
+    )
     target_response_schema = values.get(
         "response_schema", getattr(definition, "response_schema", {})
     )
@@ -223,10 +293,17 @@ def update_api(
     elif target_protocol == "http" and "status_codes" not in success_contract:
         success_contract = default_success_contract("http")
         values["success_contract"] = success_contract
+    if target_response_unpack.get("enabled"):
+        target_response_schema = _response_schema_from_legacy_contract(
+            {"body_schema": target_response_schema}, target_response_unpack
+        ) or target_response_schema
+    elif "response_schema" not in values and not target_response_schema:
+        target_response_schema = success_contract.get("body_schema", {})
     if target_response_schema:
         success_contract = {**success_contract, "body_schema": target_response_schema}
         values["success_contract"] = success_contract
     values["response_schema"] = target_response_schema
+    values["response_unpack"] = target_response_unpack
     _validate_success_contract(target_protocol, success_contract)
     if target_protocol == "http":
         values["request"] = _with_default_http_headers(

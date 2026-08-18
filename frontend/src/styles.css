@@ -298,11 +298,30 @@ html:has(.el-overlay), body:has(.el-overlay), body.el-popup-parent--hidden { ove
 .request-target-hint { margin: 4px 0 0; color: #667085; font-size: 10px; line-height: 1.35; }
 .api-description-field { margin-top: 8px; }
 .api-description-field textarea { min-height: 38px !important; resize: vertical; }
-.response-config-meta { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; align-items: start; }
-.response-config-meta .el-form-item { min-width: 0; margin-bottom: 12px; }
+.response-config-grid { display: grid; grid-template-columns: minmax(0, .95fr) minmax(0, 1.05fr); gap: 10px; align-items: stretch; margin-bottom: 12px; }
+.response-contract-card { min-width: 0; padding: 10px 12px; border: 1px solid #cbd5df; border-radius: 4px; background: #fff; }
+.response-config-card-heading { display: flex; align-items: baseline; gap: 8px; padding-bottom: 8px; margin-bottom: 9px; border-bottom: 1px solid #e3e7eb; }
+.response-config-card-heading strong { color: #3b4151; font-size: 12px; font-weight: 650; }
+.response-config-card-heading span { color: #98a2b3; font-size: 10px; }
+.response-config-fields .el-form-item { min-width: 0; margin-bottom: 9px; }
+.response-config-fields .el-form-item:last-child { margin-bottom: 0; }
+.response-config-fields .el-select { width: 100%; }
 .response-accept-field, .response-success-assertion-field { max-width: none; }
 .response-accept-select { width: 100%; }
 .response-accept-popper .el-select-dropdown__item span + code { margin-left: 8px; color: #667085; font-size: 11px; }
+.response-unpack-panel { min-width: 0; padding: 10px 12px; margin-bottom: 0; border: 1px solid #cbd5df; border-left: 3px solid #61affe; border-radius: 4px; background: #f8fbff; }
+.response-unpack-heading { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.response-unpack-heading > div { min-width: 0; }
+.response-unpack-heading .el-switch { flex: 0 0 auto; white-space: nowrap; }
+.response-unpack-heading .el-switch__label,
+.response-unpack-heading .el-switch__label * { white-space: nowrap; }
+.response-unpack-heading strong { color: #3b4151; font-size: 12px; }
+.response-unpack-heading p { margin: 3px 0 0; color: #6b7280; font-size: 10px; line-height: 1.45; }
+.response-unpack-controls { display: grid; grid-template-columns: minmax(0, 1fr) minmax(180px, .7fr); gap: 12px; align-items: end; padding-top: 9px; margin-top: 9px; border-top: 1px solid #dce9f6; }
+.response-unpack-controls .el-form-item { margin-bottom: 0; }
+.response-unpack-controls .el-select { width: 100%; }
+.response-unpack-flow { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 32px; color: #6b7280; font-size: 10px; }
+.response-unpack-flow code { padding: 4px 6px; border: 1px solid #cbd5df; border-radius: 3px; background: #fff; color: #2563a6; font-size: 10px; }
 .inheritance-notice { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 7px 11px; margin: 0 0 8px; border: 1px solid #a9eac5; border-radius: 7px; background: #ecfdf3; }
 .inheritance-notice div { display: flex; flex-direction: column; gap: 3px; }
 .inheritance-notice span { color: #475467; font-size: 12px; }
@@ -415,6 +434,11 @@ html:has(.el-overlay), body:has(.el-overlay), body.el-popup-parent--hidden { ove
 .api-editor-dialog .api-section-heading h3 { color: #3b4151; font-size: 14px; font-weight: 650; }
 .api-editor-dialog .api-section-heading p { margin-top: 3px; color: #6b7280; font-size: 11px; }
 .api-editor-dialog .api-section-heading-with-action > .el-button { border-radius: 4px; }
+.api-editor-dialog .response-config-grid { grid-template-columns: minmax(0, .95fr) minmax(0, 1.05fr); gap: 12px; }
+.api-editor-dialog .response-contract-card { padding: 10px 12px; border-color: #d9dfe5; }
+.api-editor-dialog .response-config-card-heading { border-color: #e3e7eb; }
+.api-editor-dialog .response-unpack-panel { padding: 10px 12px; }
+.api-editor-dialog .response-unpack-controls { grid-template-columns: minmax(0, 1fr) minmax(150px, .65fr); gap: 10px; }
 .api-editor-dialog .api-editor-main .el-input__wrapper,
 .api-editor-dialog .api-editor-main .el-select__wrapper,
 .api-editor-dialog .api-editor-main .el-textarea__inner { border-color: #cbd5df; border-radius: 4px; background: #fff; box-shadow: 0 0 0 1px #cbd5df inset, 0 1px 2px rgba(59, 65, 81, .04); }
@@ -493,7 +517,7 @@ html:has(.el-overlay), body:has(.el-overlay), body.el-popup-parent--hidden { ove
   .api-basic-grid { grid-template-columns: 1fr; }
   .api-target-grid, .api-target-grid.is-ws { grid-template-columns: 1fr; }
   .api-meta-row { grid-template-columns: 1fr; }
-  .response-config-meta { grid-template-columns: 1fr; }
+  .response-config-grid { grid-template-columns: 1fr; }
   .api-dialog-title-group { align-items: flex-start; flex-direction: column; gap: 5px; }
   .api-dialog-key { max-width: 100%; }
   .api-dialog-key code { max-width: 100%; }

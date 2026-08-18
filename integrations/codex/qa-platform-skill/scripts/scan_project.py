@@ -14,6 +14,7 @@ import re
 import subprocess
 from copy import deepcopy
 from datetime import datetime, timezone
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -32,6 +33,7 @@ from parameter_protocol import (
 from project_config import (
     load_project_config,
     normalize_api_templates,
+    normalize_api_template_discovery,
     normalize_flow_documents,
     normalize_openapi_config,
     normalize_package_version,
@@ -174,13 +176,41 @@ DISCOVERY_PRIORITIES = {
     "openapi": 3,
     "asyncapi": 3,
 }
-JAVA_TYPE_DECL_RE = re.compile(r"\b(?P<kind>class|record)\s+(?P<name>[A-Za-z_$][\w$]*)\b")
+JAVA_TYPE_DECL_RE = re.compile(
+    r"\b(?P<kind>class|record|enum)\s+(?P<name>[A-Za-z_$][\w$]*)\b"
+)
 JAVA_METHOD_DECL_RE = re.compile(
     r"(?m)^\s*(?:(?:public|protected|private|static|final|default|abstract|synchronized)\s+)*"
-    r"(?:<[^>]+>\s+)?[A-Za-z_$][\w$.$<>, ?\[\]]*\s+(?P<name>[A-Za-z_$][\w$]*)\s*\("
+    r"(?:<[^>]+>\s+)?(?P<return_type>[A-Za-z_$][\w$.$<>, ?\[\]&]*)\s+"
+    r"(?P<name>[A-Za-z_$][\w$]*)\s*\("
 )
 JAVA_REQUIRED_ANNOTATION_RE = re.compile(r"@(?:[\w$.]+\.)?(?:NotNull|NotBlank|NotEmpty|NonNull)\b")
 JAVA_MULTIPART_TYPE_RE = re.compile(r"\b(?:MultipartFile|Part|FilePart)\b")
+JAVA_RESPONSE_UNWRAP_TYPES = {
+    "completionstage",
+    "completablefuture",
+    "future",
+    "httpentity",
+    "optional",
+    "responseentity",
+}
+JAVA_RESPONSE_ENVELOPE_TYPES = {
+    "apiresponse",
+    "baseresponse",
+    "commonresponse",
+    "r",
+    "result",
+}
+TEMPLATE_SAFE_HEADER_NAMES = {
+    "accept",
+    "content-type",
+    "x-frontend-environment",
+    "x-trace-id",
+}
+TEMPLATE_AUTH_HEADER_NAMES = {
+    "authorization",
+    "proxy-authorization",
+}
 
 
 def join_route(prefix: str | None, route: str) -> str:
@@ -245,6 +275,93 @@ def _strip_config_comment(value: str) -> str:
         elif char == "#" and (index == 0 or value[index - 1].isspace()):
             return value[:index].rstrip()
     return value.strip()
+
+
+def _config_literal(value: Any) -> str:
+    """Return a scalar configuration value without YAML/Properties quoting."""
+    cleaned = _strip_config_comment(str(value or "")).strip()
+    if len(cleaned) >= 2 and cleaned[0] in {"'", '"'} and cleaned[-1] == cleaned[0]:
+        cleaned = cleaned[1:-1]
+    return cleaned.strip()
+
+
+def _simple_config_entries(path: Path) -> list[dict[str, Any]]:
+    """Read literal scalar/list values from common Spring config formats.
+
+    This deliberately understands only the small subset needed for safe
+    reusable-template discovery. It does not evaluate placeholders, profile
+    expressions, or arbitrary YAML objects.
+    """
+    entries: list[dict[str, Any]] = []
+
+    def add(key: str, value: Any, line: int) -> None:
+        normalized = _normalized_config_key(key)
+        literal = _config_literal(value)
+        if normalized and literal:
+            entries.append({"key": normalized, "value": literal, "line": line})
+
+    suffix = path.suffix.lower()
+    text = read_text(path)
+    if suffix == ".properties":
+        for line_number, raw_line in enumerate(text.splitlines(), 1):
+            line = raw_line.strip()
+            if not line or line.startswith(("#", "!")):
+                continue
+            match = re.match(r"(?P<key>[^:=\s]+)\s*(?:=|:)\s*(?P<value>.*)$", line)
+            if match:
+                add(match.group("key"), match.group("value"), line_number)
+        return entries
+
+    if suffix == ".json":
+        try:
+            document = json.loads(text)
+        except (OSError, json.JSONDecodeError):
+            return entries
+
+        def visit(value: Any, prefix: tuple[str, ...] = ()) -> None:
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    visit(child, (*prefix, str(key)))
+                return
+            if isinstance(value, list):
+                for child in value:
+                    visit(child, prefix)
+                return
+            if prefix:
+                add(".".join(prefix), value, 1)
+
+        visit(document)
+        return entries
+
+    stack: list[tuple[int, str]] = []
+    for line_number, raw_line in enumerate(text.splitlines(), 1):
+        expanded = raw_line.expandtabs(2)
+        stripped = expanded.strip()
+        if not stripped or stripped.startswith("#") or stripped.startswith("---"):
+            if stripped == "---":
+                stack.clear()
+            continue
+        indent = len(expanded) - len(expanded.lstrip(" "))
+        if stripped.startswith("-"):
+            while stack and indent < stack[-1][0]:
+                stack.pop()
+            value = stripped[1:].strip()
+            if stack:
+                add(".".join(item[1] for item in stack), value, line_number)
+            continue
+        match = re.match(r"(?P<key>[^:]+):(?P<value>.*)$", stripped)
+        if not match:
+            continue
+        while stack and indent <= stack[-1][0]:
+            stack.pop()
+        key = match.group("key").strip().strip("'\"")
+        raw_value = match.group("value").strip()
+        full_key = ".".join((*[item[1] for item in stack], key))
+        if raw_value and raw_value not in {"|", ">"}:
+            add(full_key, raw_value, line_number)
+        else:
+            stack.append((indent, key))
+    return entries
 
 
 def _normalize_spring_prefix(value: str) -> str | None:
@@ -670,6 +787,7 @@ def ensure_interface(
             "parameters": [],
             "request_schema": {},
             "response_schema": {},
+            "response_unpack": {},
             "auth": "unknown",
             "tags": [],
             "source_refs": [],
@@ -1030,8 +1148,14 @@ def _strip_java_annotations(value: str) -> str:
     return "".join(result)
 
 
+def _strip_java_comments(value: str) -> str:
+    """Remove comments from a declaration without changing string literals."""
+    value = re.sub(r"/\*[\s\S]*?\*/", " ", value)
+    return re.sub(r"//[^\r\n]*", " ", value)
+
+
 def _java_declaration(value: str) -> tuple[str, str] | None:
-    clean = _strip_java_annotations(value).strip().rstrip(",;")
+    clean = _strip_java_annotations(_strip_java_comments(value)).strip().rstrip(",;")
     clean = re.sub(
         r"\b(?:public|protected|private|static|final|volatile|transient)\b", " ", clean
     )
@@ -1044,6 +1168,7 @@ def _java_declaration(value: str) -> tuple[str, str] | None:
 
 def _java_schema_for_type(type_name: str) -> dict[str, Any]:
     raw = re.sub(r"\s+", "", type_name).removeprefix("?")
+    raw = re.sub(r"^(?:extends|super)", "", raw)
     if raw.lower().startswith("optional<") and raw.endswith(">"):
         return _java_schema_for_type(raw[len("Optional<") : -1])
     if raw.endswith("..."):
@@ -1200,6 +1325,14 @@ def _java_field_schema(
         return None
     schema = _java_schema_for_type(type_name)
     description, default, example = _java_parameter_metadata(value, schema)
+    if not description:
+        comments = list(JAVA_DOC_RE.finditer(value))
+        if comments:
+            description = _java_doc_summary(comments[-1].group("body"))
+        else:
+            line_comment = re.search(r"//\s*(?P<body>[^\r\n]+)", value)
+            if line_comment:
+                description = " ".join(line_comment.group("body").split())
     assignment = re.search(r"=\s*(?P<value>[^;]+)$", value.strip(), re.DOTALL)
     if default is None and assignment:
         default = _java_literal_value(assignment.group("value"))
@@ -1272,6 +1405,18 @@ def _java_schema_for_declaration(
 ) -> dict[str, Any]:
     body_start = int(declaration["body_start"])
     body_end = int(declaration["body_end"])
+    if declaration["kind"] == "enum":
+        enum_values: list[str] = []
+        enum_body = text[body_start + 1 : body_end].split(";", 1)[0]
+        for raw_value in _split_top_level(enum_body):
+            clean_value = _strip_java_comments(_strip_java_annotations(raw_value)).strip()
+            match = re.match(r"(?P<name>[A-Za-z_$][\w$]*)", clean_value)
+            if match:
+                enum_values.append(match.group("name"))
+        result: dict[str, Any] = {"type": "string"}
+        if enum_values:
+            result["enum"] = enum_values
+        return result
     body = list(text[body_start + 1 : body_end])
     for child in declarations:
         if child is declaration or not (body_start < child["start"] and child["body_end"] < body_end):
@@ -1348,7 +1493,21 @@ def _expand_java_schema_references(
             expanded = _expand_java_schema_references(
                 schemas[target_name], schemas, {*trail, target_name}
             )
-            expanded.update(result)
+            # Keep the referenced DTO/enum's structural type.  The source
+            # field marker is initially represented as ``object``; blindly
+            # updating the resolved enum would turn it back into an object
+            # and discard the enum contract.  Field-level documentation and
+            # constraints still override the referenced metadata.
+            for key, value in result.items():
+                if key in {"type", "properties", "required", "items", "enum"}:
+                    continue
+                expanded[key] = value
+            if (
+                isinstance(expanded.get("enum"), list)
+                and expanded.get("enum")
+                and result.get("example") in (None, {})
+            ):
+                expanded["example"] = deepcopy(expanded["enum"][0])
             result = expanded
 
     properties = result.get("properties")
@@ -1379,6 +1538,128 @@ def _resolve_java_body_schema(type_name: str, schemas: dict[str, dict[str, Any]]
     return schema
 
 
+def _java_type_parts(type_name: str) -> tuple[str, list[str]]:
+    """Split a Java type and its top-level generic arguments conservatively."""
+    compact = re.sub(r"\s+", "", _strip_java_comments(type_name)).strip()
+    if compact.startswith("?"):
+        compact = re.sub(r"^\?(?:extends|super)?", "", compact)
+    opening = compact.find("<")
+    if opening < 0 or not compact.endswith(">"):
+        return compact, []
+    return compact[:opening], _split_top_level(compact[opening + 1 : -1], delimiter=",")
+
+
+def _java_schema_reference_known(schema: Any, schemas: dict[str, dict[str, Any]]) -> bool:
+    """Report whether all internal Java type markers can be resolved."""
+    if not isinstance(schema, dict):
+        return True
+    reference = schema.get(JAVA_TYPE_MARKER)
+    if isinstance(reference, str):
+        candidates = [reference, reference.rsplit(".", 1)[-1]]
+        if not any(candidate in schemas for candidate in candidates):
+            return False
+    for value in schema.get("properties", {}).values() if isinstance(schema.get("properties"), dict) else ():
+        if not _java_schema_reference_known(value, schemas):
+            return False
+    return _java_schema_reference_known(schema.get("items"), schemas)
+
+
+def _java_response_schema_for_type(
+    type_name: str,
+    schemas: dict[str, dict[str, Any]],
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Convert a Spring method return type into a reviewable response schema."""
+    base, arguments = _java_type_parts(type_name)
+    simple_base = base.rsplit(".", 1)[-1].lower()
+    if simple_base in {"void", "unit"}:
+        return {}
+    if simple_base in JAVA_RESPONSE_UNWRAP_TYPES:
+        return (
+            _java_response_schema_for_type(arguments[0], schemas, warnings)
+            if arguments
+            else {}
+        )
+    if simple_base in JAVA_RESPONSE_ENVELOPE_TYPES:
+        warnings.append(
+            f"Spring response wrapper {type_name} was inferred as code/data; verify the business envelope before import"
+        )
+        data_schema = (
+            _java_response_schema_for_type(arguments[0], schemas, warnings)
+            if arguments
+            else {"type": "object"}
+        )
+        if not arguments:
+            warnings.append(
+                f"Spring response wrapper {type_name} has no generic data type; response.data remains an object"
+            )
+        return {
+            "type": "object",
+            "required": ["code", "data"],
+            "properties": {
+                "code": {
+                    "type": "integer",
+                    "const": 0,
+                    "description": "业务响应码。",
+                    "example": 0,
+                },
+                "data": data_schema,
+            },
+        }
+
+    schema = _java_schema_for_type(type_name)
+    if not _java_schema_reference_known(schema, schemas):
+        warnings.append(
+            f"Spring response type {type_name} is not indexed in source; response fields remain an object placeholder"
+        )
+    # Start with an empty trail so the top-level DTO can expand. Recursive
+    # self-references are still stopped once the target name is added by the
+    # expansion routine.
+    return _expand_java_schema_references(schema, schemas, set())
+
+
+def _set_spring_response_schema(
+    item: dict[str, Any],
+    return_type: str | None,
+    java_schemas: dict[str, dict[str, Any]],
+    language: str | None = "en",
+) -> None:
+    """Attach a static Spring response contract when a return type is visible."""
+    normalized = str(return_type or "").strip()
+    if not normalized:
+        return
+    response_warnings: list[str] = []
+    schema = _java_response_schema_for_type(normalized, java_schemas, response_warnings)
+    for warning in response_warnings:
+        _add_item_warning(item, warning)
+    if not schema:
+        return
+    schema = _enrich_schema_fields(schema, language)
+    _warn_schema_gaps(item, schema, "Response")
+    unpack = _response_unpack_for_schema(schema)
+    if unpack:
+        item["response_unpack"] = {
+            key: value for key, value in unpack.items() if key != "data_schema"
+        }
+        item["response_schema"] = unpack["data_schema"]
+    else:
+        item.pop("response_unpack", None)
+        item["response_schema"] = schema
+
+    # A typed object/array response is JSON by convention unless an OpenAPI
+    # source later supplies a more specific media type.  Preserve a raw
+    # Spring request schema while normalizing it to the http-api/v1 wrapper.
+    if schema.get("type") in {"object", "array"}:
+        current = item.get("request_schema")
+        if not isinstance(current, dict):
+            current = {}
+        elif current and "schema" not in current and "accept" not in current:
+            current = {"schema": deepcopy(current)}
+        current.setdefault("schema", {})
+        current.setdefault("accept", "application/json")
+        item["request_schema"] = current
+
+
 def _java_method_declaration_after(text: str, start: int) -> re.Match[str] | None:
     # ``SPRING_RE`` intentionally consumes indentation after an annotation;
     # begin at the physical line start so the declaration expression can still
@@ -1396,6 +1677,11 @@ def _java_method_parameters_after(text: str, start: int) -> list[str]:
     if closing is None:
         return []
     return _split_top_level(text[opening + 1 : closing])
+
+
+def _java_method_return_type_after(text: str, start: int) -> str:
+    match = _java_method_declaration_after(text, start)
+    return str(match.group("return_type") or "").strip() if match else ""
 
 
 def _java_method_name_after(text: str, start: int) -> str:
@@ -1661,6 +1947,7 @@ def parse_spring_routes(
         else:
             methods = [method] if method else ["GET"]
         signature_parameters = _java_method_parameters_after(text, match.end())
+        return_type = _java_method_return_type_after(text, match.end())
         for selected in methods:
             item = ensure_interface(
                 interfaces,
@@ -1678,6 +1965,12 @@ def parse_spring_routes(
                 for context_ref in context_refs or []:
                     add_ref(item, context_ref)
                 _add_spring_parameters(item, signature_parameters, java_schemas or {}, language)
+                _set_spring_response_schema(
+                    item,
+                    return_type,
+                    java_schemas or {},
+                    language,
+                )
 
 
 def parse_call_routes(
@@ -2214,6 +2507,29 @@ def _response_schema_from_operation(
     return _preferred_json_type(swagger_produces), {}
 
 
+def _response_unpack_for_schema(schema: dict[str, Any]) -> dict[str, Any] | None:
+    """Recognize a strongly evidenced ``{code, data}`` response envelope."""
+    if not isinstance(schema, dict) or schema.get("type") != "object":
+        return None
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return None
+    code_schema = properties.get("code")
+    data_schema = properties.get("data")
+    if not isinstance(code_schema, dict) or not isinstance(data_schema, dict):
+        return None
+    required = {str(value) for value in schema.get("required", [])}
+    has_success_signal = "const" in code_schema or isinstance(code_schema.get("enum"), list)
+    if not ({"code", "data"} <= required or has_success_signal):
+        return None
+    return {
+        "enabled": True,
+        "source": "body.data",
+        "envelope_schema": deepcopy(schema),
+        "data_schema": deepcopy(data_schema),
+    }
+
+
 def load_openapi(
     path: Path,
     root: Path,
@@ -2404,9 +2720,16 @@ def load_openapi(
             _set_accept(item, response_content_type)
             if response_schema:
                 _warn_schema_gaps(item, response_schema, "Response")
-                item["response_schema"] = _enrich_schema_fields(
-                    response_schema, language
-                )
+                enriched_response_schema = _enrich_schema_fields(response_schema, language)
+                unpack = _response_unpack_for_schema(enriched_response_schema)
+                if unpack:
+                    item["response_unpack"] = {
+                        key: value for key, value in unpack.items() if key != "data_schema"
+                    }
+                    item["response_schema"] = unpack["data_schema"]
+                else:
+                    item.pop("response_unpack", None)
+                    item["response_schema"] = enriched_response_schema
             elif isinstance(operation.get("responses"), dict) and any(
                 str(status).startswith("2") and str(status) != "204"
                 for status in operation["responses"]
@@ -3012,6 +3335,338 @@ def localize_assets(
         plan["description"] = "按版本汇总测试流程和未被流程覆盖接口的待审核测试计划。"
 
 
+def _javascript_named_block(text: str, names: tuple[str, ...]) -> str:
+    """Extract a likely shared request-header builder from JS/TS source."""
+    for name in names:
+        function_match = re.search(rf"\bfunction\s+{re.escape(name)}\b", text)
+        if function_match:
+            opening_paren = text.find("(", function_match.end())
+            closing_paren = _find_matching_delimiter(text, opening_paren)
+            opening = text.find("{", closing_paren or function_match.end())
+            closing = _find_matching_delimiter(text, opening, "{", "}")
+            if opening >= 0 and closing is not None:
+                return text[function_match.start() : closing + 1]
+        arrow_match = re.search(
+            rf"\b(?:const|let|var)\s+{re.escape(name)}\b", text
+        )
+        if arrow_match:
+            arrow = text.find("=>", arrow_match.end())
+            opening = text.find("{", arrow)
+            closing = _find_matching_delimiter(text, opening, "{", "}")
+            if arrow >= 0 and opening >= 0 and closing is not None:
+                return text[arrow_match.start() : closing + 1]
+    return ""
+
+
+def _javascript_literal(value: str) -> str | None:
+    """Decode only a plain JS string literal; expressions remain unresolved."""
+    value = value.strip().rstrip(",")
+    if len(value) < 2 or value[0] not in {"'", '"', "`"} or value[-1] != value[0]:
+        return None
+    if value[0] == "`" and "${" in value:
+        return None
+    return (
+        value[1:-1]
+        .replace(r"\\n", "\n")
+        .replace(r"\\r", "\r")
+        .replace(r"\\t", "\t")
+        .replace(r'\"', '"')
+        .replace(r"\'", "'")
+        .replace(r"\\", "\\")
+    )
+
+
+def _safe_frontend_header_value(name: str, expression: str) -> str | None:
+    """Convert a shared frontend header expression into a secret-free value."""
+    normalized = name.strip().lower()
+    expression = expression.strip().rstrip(",")
+    if normalized in TEMPLATE_AUTH_HEADER_NAMES:
+        if re.search(r"bearer", expression, re.IGNORECASE):
+            return "Bearer {{ access_token }}"
+        return "{{ access_token }}"
+    if normalized == "x-trace-id":
+        return "{{ random.uuid(32) }}"
+    if normalized == "x-frontend-environment":
+        return "{{ frontend_environment }}"
+    if normalized not in TEMPLATE_SAFE_HEADER_NAMES:
+        return None
+    literal = _javascript_literal(expression)
+    if literal is not None and literal.strip():
+        return literal.strip()
+    return None
+
+
+def discover_frontend_api_template(
+    files: list[Path], root: Path
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """Discover safe headers from a shared frontend request wrapper."""
+    header_values: dict[str, str] = {}
+    header_refs: dict[str, list[dict[str, Any]]] = {}
+    warnings: list[str] = []
+    for path in files:
+        if path.suffix.lower() not in {".js", ".jsx", ".ts", ".tsx", ".vue"}:
+            continue
+        text = read_text(path)
+        constants: dict[str, str] = {}
+        for constant in re.finditer(
+            r"\b(?:const|let|var)\s+(?P<name>[A-Za-z_$][\w$]*)\s*=\s*(?P<value>['\"][^'\"]+['\"])",
+            text,
+        ):
+            literal = _javascript_literal(constant.group("value"))
+            if literal:
+                constants[constant.group("name")] = literal
+        block = _javascript_named_block(
+            text,
+            (
+                "buildRequestHeaders",
+                "buildRequestHeader",
+                "createRequestHeaders",
+                "createRequestHeader",
+            ),
+        )
+        if not block:
+            continue
+
+        expressions: list[tuple[str, str, int]] = []
+        value_pattern = r"""(?:(?P<quote>['"])(?P<quoted>[A-Za-z0-9-]+)(?P=quote)|(?P<bare>[A-Za-z_$][\w$-]*))\s*:\s*(?P<value>`(?:\\.|[^`])*`|\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^,\n}]+)"""
+        for match in re.finditer(value_pattern, block, re.DOTALL):
+            name = match.group("quoted") or match.group("bare") or ""
+            expressions.append(
+                (
+                    name,
+                    match.group("value"),
+                    text.count("\n", 0, text.find(block) + match.start()) + 1,
+                )
+            )
+        computed_pattern = r"""\[(?P<reference>[A-Za-z_$][\w$]*)\]\s*:\s*(?P<value>`(?:\\.|[^`])*`|\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^,\n}]+)"""
+        for match in re.finditer(computed_pattern, block, re.DOTALL):
+            name = constants.get(match.group("reference"), "")
+            if not name:
+                continue
+            expressions.append(
+                (
+                    name,
+                    match.group("value"),
+                    text.count("\n", 0, text.find(block) + match.start()) + 1,
+                )
+            )
+        for name, expression, line in expressions:
+            normalized = name.strip().lower()
+            value = _safe_frontend_header_value(name, expression)
+            if value is None:
+                continue
+            if normalized in header_values and header_values[normalized] != value:
+                warnings.append(
+                    f"Frontend shared request header {name} has conflicting static values; kept the first value"
+                )
+                continue
+            header_values.setdefault(normalized, value)
+            header_refs.setdefault(normalized, []).append(source_ref(path, root, line))
+
+    if not header_values:
+        return None, warnings
+    headers: dict[str, str] = {}
+    display_names = {
+        "accept": "Accept",
+        "content-type": "Content-Type",
+        "x-frontend-environment": "X-Frontend-Environment",
+        "x-trace-id": "X-Trace-Id",
+        "authorization": "Authorization",
+        "proxy-authorization": "Proxy-Authorization",
+    }
+    refs: list[dict[str, Any]] = []
+    for normalized, value in header_values.items():
+        headers[display_names.get(normalized, normalized)] = value
+        for ref in header_refs.get(normalized, []):
+            if ref not in refs:
+                refs.append(ref)
+    return (
+        {
+            "key": "scanner:frontend-http",
+            "name": "前端公共 HTTP 请求模板",
+            "protocol": "http",
+            "description": "从前端公共请求封装静态发现的安全默认请求头；动态值使用 qa-platform 变量。",
+            "request": {"headers": headers},
+            "match": {"protocol": "http"},
+            "origin": "scanner",
+            "discovery_method": "frontend-request-wrapper",
+            "confidence": 0.9,
+            "source_refs": refs,
+        },
+        warnings,
+    )
+
+
+def _config_bool(value: str | None) -> bool | None:
+    if value is None:
+        return None
+    normalized = _config_literal(value).lower()
+    if normalized in {"true", "on", "yes", "1"}:
+        return True
+    if normalized in {"false", "off", "no", "0"}:
+        return False
+    return None
+
+
+def discover_gateway_api_template(
+    files: list[Path], root: Path, base_headers: dict[str, str] | None = None
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """Discover a secret-free gateway Authorization template and exclusions."""
+    candidates: list[dict[str, Any]] = []
+    for path in files:
+        if not SPRING_APPLICATION_CONFIG_RE.match(path.name):
+            continue
+        entries = _simple_config_entries(path)
+        relevant = [
+            entry
+            for entry in entries
+            if str(entry.get("key", "")).startswith("gateway.security.")
+        ]
+        if not relevant:
+            continue
+        values: dict[str, list[dict[str, Any]]] = {}
+        for entry in relevant:
+            key = str(entry["key"])
+            values.setdefault(key, []).append(entry)
+        def first(*keys: str) -> dict[str, Any] | None:
+            for key in keys:
+                matches = values.get(key)
+                if matches:
+                    return matches[0]
+            return None
+
+        enabled_entry = first("gateway.security.enabled")
+        require_entry = first("gateway.security.requiretoken")
+        enabled = _config_bool(str(enabled_entry["value"])) if enabled_entry else None
+        require_token = _config_bool(str(require_entry["value"])) if require_entry else None
+        header_entry = first("gateway.security.headername")
+        prefix_entry = first("gateway.security.tokenprefix")
+        if enabled is False or require_token is False:
+            continue
+        if not any((require_token is True, header_entry, prefix_entry)):
+            continue
+        header_name = _config_literal(header_entry["value"]) if header_entry else "Authorization"
+        token_prefix = _config_literal(prefix_entry["value"]) if prefix_entry else "Bearer"
+        if not header_name or not token_prefix:
+            continue
+        ignore_paths: list[str] = []
+        ignore_refs: list[dict[str, Any]] = []
+        for key, key_entries in values.items():
+            if not key.startswith("gateway.security.ignoreurls"):
+                continue
+            for entry in key_entries:
+                path_value = _config_literal(entry["value"])
+                if not path_value or path_value.startswith(("${", "#{")):
+                    continue
+                if path_value not in ignore_paths:
+                    ignore_paths.append(path_value)
+                ref = source_ref(path, root, int(entry["line"]))
+                if ref not in ignore_refs:
+                    ignore_refs.append(ref)
+        refs: list[dict[str, Any]] = []
+        for entry in (enabled_entry, require_entry, header_entry, prefix_entry):
+            if entry:
+                ref = source_ref(path, root, int(entry["line"]))
+                if ref not in refs:
+                    refs.append(ref)
+        refs.extend(ref for ref in ignore_refs if ref not in refs)
+        candidates.append(
+            {
+                "path": path,
+                "priority": _application_config_priority(path),
+                "header_name": header_name,
+                "token_prefix": token_prefix,
+                "ignore_paths": ignore_paths,
+                "source_refs": refs,
+            }
+        )
+
+    if not candidates:
+        return None, []
+    candidates.sort(key=lambda item: (int(item["priority"]), str(item["path"])))
+    selected = candidates[0]
+    warnings: list[str] = []
+    signatures = {
+        (
+            str(candidate["header_name"]),
+            str(candidate["token_prefix"]),
+            tuple(candidate["ignore_paths"]),
+        )
+        for candidate in candidates
+    }
+    if len(signatures) > 1:
+        warnings.append(
+            "Multiple Spring gateway security configurations were found; the highest-priority application config was used for the API template"
+        )
+    headers = deepcopy(base_headers or {})
+    # Assemble the placeholder from a literal prefix without ever copying a
+    # configured secret/token value.
+    headers[str(selected["header_name"])] = (
+        f"{selected['token_prefix']} {{{{ access_token }}}}"
+        if str(selected["token_prefix"])
+        else "{{ access_token }}"
+    )
+    match: dict[str, Any] = {"protocol": "http"}
+    if selected["ignore_paths"]:
+        match["exclude_paths"] = sorted(set(selected["ignore_paths"]))
+    return (
+        {
+            "key": "scanner:gateway-auth-http",
+            "name": "网关鉴权 HTTP 请求模板",
+            "protocol": "http",
+            "description": "从 Spring 网关安全配置静态发现的鉴权请求头；令牌由 access_token 变量提供。",
+            "request": {"headers": headers},
+            "match": match,
+            "origin": "scanner",
+            "discovery_method": "spring-gateway-security",
+            "confidence": 0.92,
+            "source_refs": selected["source_refs"],
+        },
+        warnings,
+    )
+
+
+def discover_api_templates(
+    files: list[Path], root: Path, language: str | None = "zh-CN"
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Discover reusable project request templates from static source evidence."""
+    frontend_template, warnings = discover_frontend_api_template(files, root)
+    base_headers = {}
+    if frontend_template:
+        base_headers = deepcopy(frontend_template.get("request", {}).get("headers", {}))
+    gateway_template, gateway_warnings = discover_gateway_api_template(
+        files, root, base_headers
+    )
+    warnings.extend(gateway_warnings)
+    templates: list[dict[str, Any]] = []
+    if gateway_template:
+        templates.append(gateway_template)
+    if frontend_template:
+        templates.append(frontend_template)
+    if templates and not str(language or "").lower().startswith("zh"):
+        for template in templates:
+            if template["key"] == "scanner:frontend-http":
+                template["name"] = "Frontend shared HTTP request"
+                template["description"] = "Safe defaults statically discovered from the shared frontend request wrapper."
+            else:
+                template["name"] = "Gateway authenticated HTTP request"
+                template["description"] = "Authorization defaults statically discovered from Spring gateway security configuration."
+    return templates, warnings
+
+
+def _match_path_pattern(path: str, pattern: str) -> bool:
+    normalized = str(pattern or "").strip()
+    if not normalized:
+        return False
+    if fnmatchcase(path, normalized):
+        return True
+    if normalized.endswith("/**") and path == normalized[:-3].rstrip("/"):
+        return True
+    if normalized.endswith("/*") and path == normalized[:-2].rstrip("/"):
+        return True
+    return False
+
+
 def _template_matches(interface: dict[str, Any], match: dict[str, Any]) -> bool:
     if not match:
         return False
@@ -3041,6 +3696,29 @@ def _template_matches(interface: dict[str, Any], match: dict[str, Any]) -> bool:
     prefix = match.get("path_prefix")
     if prefix and not path.startswith(str(prefix)):
         return False
+    excluded_paths = match.get("exclude_paths", match.get("exclude_path"))
+    if isinstance(excluded_paths, str):
+        excluded_paths = [excluded_paths]
+    if isinstance(excluded_paths, list) and any(
+        _match_path_pattern(path, str(pattern)) for pattern in excluded_paths
+    ):
+        return False
+    excluded_prefixes = match.get("exclude_path_prefixes")
+    if isinstance(excluded_prefixes, str):
+        excluded_prefixes = [excluded_prefixes]
+    if isinstance(excluded_prefixes, list) and any(
+        path.startswith(str(pattern)) for pattern in excluded_prefixes
+    ):
+        return False
+    excluded_regex = match.get("exclude_path_regex")
+    if excluded_regex:
+        try:
+            if re.search(str(excluded_regex), path) is not None:
+                return False
+        except re.error as exc:
+            raise SystemExit(
+                f"Invalid api_templates.match.exclude_path_regex {excluded_regex}: {exc}"
+            ) from None
     regex = match.get("path_regex")
     if regex:
         try:
@@ -3379,6 +4057,9 @@ def scan(args: argparse.Namespace) -> dict[str, Any]:
         config.get("success_assertions")
     )
     api_templates = normalize_api_templates(config.get("api_templates"))
+    template_discovery = normalize_api_template_discovery(
+        config.get("api_template_discovery")
+    )
     flow_document_config = normalize_flow_documents(config.get("flow_documents"))
     openapi_config = normalize_openapi_config(config.get("openapi"))
     configured_variables = config.get("variables")
@@ -3535,6 +4216,17 @@ def scan(args: argparse.Namespace) -> dict[str, Any]:
             }
         )
 
+    if not api_templates and template_discovery["enabled"]:
+        discovered_templates, template_warnings = discover_api_templates(
+            files, root, language["code"]
+        )
+        api_templates = normalize_api_templates(discovered_templates)
+        warnings.extend(template_warnings)
+    if not api_templates:
+        warnings.append(
+            "No reusable API template was configured or statically discovered; APIs have no template_key"
+        )
+
     finalize_http_request_schemas(interfaces)
     apply_api_template_bindings(interfaces, api_templates)
     success_code_candidates, success_code_warnings = discover_success_code_values(root, files)
@@ -3605,6 +4297,7 @@ def scan(args: argparse.Namespace) -> dict[str, Any]:
             "ws": sorted(interfaces["ws"].values(), key=lambda item: item["key"]),
         },
         "api_templates": api_templates,
+        "api_template_discovery": template_discovery,
         "assertion_definitions": success_assertions["assertion_definitions"],
         "success_assertions": {
             "source": success_assertions["source"],
