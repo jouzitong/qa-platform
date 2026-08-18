@@ -1343,7 +1343,7 @@ watch(apiSearch, () => { apiPage.value = 1 })
                   <div class="response-contract-card">
                     <div class="response-config-card-heading"><strong>响应契约</strong><span>类型与判定</span></div>
                     <div class="response-config-fields">
-                      <el-form-item v-if="form.protocol === 'http'" label="响应媒体类型（Accept）" class="response-accept-field">
+                      <el-form-item v-if="form.protocol === 'http'" label="响应媒体类型（Accept）" class="response-accept-field response-floating-field">
                         <el-select
                           v-model="requestSchemaAccept"
                           class="response-accept-select"
@@ -1359,7 +1359,7 @@ watch(apiSearch, () => { apiPage.value = 1 })
                           </el-option>
                         </el-select>
                       </el-form-item>
-                      <el-form-item label="成功条件" class="response-success-assertion-field">
+                      <el-form-item label="成功条件" class="response-success-assertion-field response-floating-field">
                         <el-select v-model="form.success_assertion_id" clearable placeholder="选择一个成功条件">
                           <el-option v-for="item in assertions" :key="item.id" :label="item.name" :value="item.id">
                             <span>{{ item.name }}</span><code class="select-option-key">{{ item.key }}</code>

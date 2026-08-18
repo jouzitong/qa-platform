@@ -306,6 +306,11 @@ html:has(.el-overlay), body:has(.el-overlay), body.el-popup-parent--hidden { ove
 .response-config-fields .el-form-item { min-width: 0; margin-bottom: 9px; }
 .response-config-fields .el-form-item:last-child { margin-bottom: 0; }
 .response-config-fields .el-select { width: 100%; }
+.response-floating-field { position: relative; padding-top: 5px; }
+.response-floating-field > .el-form-item__label { position: absolute; top: -2px; left: 8px; z-index: 1; height: auto; padding: 0 4px; margin: 0; background: #fff; color: #59626e; font-size: 10px; line-height: 12px; white-space: nowrap; }
+.response-floating-field > .el-form-item__content { display: block; min-width: 0; }
+.response-floating-field:focus-within > .el-form-item__label { color: #2563a6; }
+.response-floating-field .muted { margin-top: 5px; }
 .response-accept-field, .response-success-assertion-field { max-width: none; }
 .response-accept-select { width: 100%; }
 .response-accept-popper .el-select-dropdown__item span + code { margin-left: 8px; color: #667085; font-size: 11px; }
@@ -437,6 +442,7 @@ html:has(.el-overlay), body:has(.el-overlay), body.el-popup-parent--hidden { ove
 .api-editor-dialog .response-config-grid { grid-template-columns: minmax(0, .95fr) minmax(0, 1.05fr); gap: 12px; }
 .api-editor-dialog .response-contract-card { padding: 10px 12px; border-color: #d9dfe5; }
 .api-editor-dialog .response-config-card-heading { border-color: #e3e7eb; }
+.api-editor-dialog .response-floating-field > .el-form-item__label { top: -2px; background: #fff; }
 .api-editor-dialog .response-unpack-panel { padding: 10px 12px; }
 .api-editor-dialog .response-unpack-controls { grid-template-columns: minmax(0, 1fr) minmax(150px, .65fr); gap: 10px; }
 .api-editor-dialog .api-editor-main .el-input__wrapper,
