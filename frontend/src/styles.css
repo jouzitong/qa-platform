@@ -83,11 +83,16 @@ body { margin: 0; min-width: 1120px; min-height: 100vh; overflow: hidden; }
 .api-group-tree .el-tree-node__expand-icon { color: #98a2b3; }
 .api-group-node { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 8px; width: 100%; padding-right: 2px; }
 .api-group-node > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.api-group-node-tools { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; }
-.api-group-node small { flex: 0 0 auto; min-width: 20px; padding: 2px 5px; border-radius: 10px; background: #f2f4f7; color: #667085; font-size: 10px; font-weight: 600; line-height: 1.2; text-align: center; }
-.api-group-actions { display: inline-flex; align-items: center; gap: 0; opacity: 0; pointer-events: none; transition: opacity .15s ease; }
-.api-group-tree .el-tree-node__content:hover .api-group-actions,
-.api-group-tree .el-tree-node__content:focus-within .api-group-actions { opacity: 1; pointer-events: auto; }
+.api-group-node-tools { position: relative; display: flex; flex: 0 0 22px; align-items: center; justify-content: flex-end; width: 22px; height: 24px; }
+.api-group-node small { min-width: 20px; padding: 2px 5px; border-radius: 10px; background: #f2f4f7; color: #667085; font-size: 10px; font-weight: 600; line-height: 1.2; text-align: center; }
+.api-group-count { position: absolute; right: 0; transition: opacity .15s ease; }
+.api-group-menu-trigger { position: absolute; top: 1px; right: 0; width: 22px; height: 22px; padding: 0 !important; margin: 0 !important; border-radius: 5px; color: #667085 !important; opacity: 0; pointer-events: none; transition: opacity .15s ease; }
+.api-group-tree .el-tree-node__content:hover .api-group-count,
+.api-group-tree .el-tree-node__content:focus-within .api-group-count { opacity: 0; }
+.api-group-tree .el-tree-node__content:hover .api-group-menu-trigger,
+.api-group-tree .el-tree-node__content:focus-within .api-group-menu-trigger { opacity: 1; pointer-events: auto; }
+.api-group-menu-trigger:hover, .api-group-menu-trigger:focus-visible { background: #e4e7ec; color: #344054 !important; }
+.api-group-actions { position: absolute; top: 1px; right: -2px; z-index: 2; display: inline-flex; flex-direction: column; align-items: center; gap: 1px; padding: 2px; border: 1px solid #d0d5dd; border-radius: 6px; background: #fff; box-shadow: 0 4px 10px rgba(16, 24, 40, .12); }
 .api-group-action { width: 22px; height: 22px; padding: 0 !important; margin: 0 !important; border-radius: 5px; color: #667085 !important; }
 .api-group-action:hover, .api-group-action:focus-visible { background: #e4e7ec; color: #344054 !important; }
 .api-group-action.is-danger:hover, .api-group-action.is-danger:focus-visible { background: #fef3f2; color: #b42318 !important; }

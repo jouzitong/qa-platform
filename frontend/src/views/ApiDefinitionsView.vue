@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { Delete, Edit, Plus, Search, VideoPlay } from '@element-plus/icons-vue'
+import { Delete, Edit, MoreFilled, Plus, Search, VideoPlay } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 
 import { api } from '../api/client'
 import ApiParametersEditor from '../components/ApiParametersEditor.vue'
@@ -48,6 +48,7 @@ type ApiGroupNode = {
 }
 
 const selectedGroupPath = ref('/')
+const activeGroupActionPath = ref<string | null>(null)
 const form = reactive({
   key: '', group_path: '/', name: '', protocol: 'http' as 'http' | 'ws', template_id: null as string | null,
   success_assertion_id: undefined as string | null | undefined,
@@ -242,7 +243,22 @@ function addParameter() {
 
 function selectApiGroup(node: ApiGroupNode) {
   selectedGroupPath.value = node.path
+  activeGroupActionPath.value = null
 }
+
+function toggleGroupActions(path: string) {
+  activeGroupActionPath.value = activeGroupActionPath.value === path ? null : path
+}
+
+function closeGroupActionsOnOutsideClick(event: MouseEvent) {
+  if (!activeGroupActionPath.value) return
+  const target = event.target
+  if (target instanceof Element && target.closest('.api-group-actions, .api-group-menu-trigger')) return
+  activeGroupActionPath.value = null
+}
+
+onMounted(() => document.addEventListener('click', closeGroupActionsOnOutsideClick))
+onBeforeUnmount(() => document.removeEventListener('click', closeGroupActionsOnOutsideClick))
 
 function normalizeGroupName(value: unknown) {
   const name = String(value || '').trim()
@@ -274,6 +290,7 @@ async function createApiGroup(parent: ApiGroupNode) {
       name: normalizeGroupName(result.value),
     })
     selectedGroupPath.value = group.path
+    activeGroupActionPath.value = null
     await load()
     ElMessage.success('目录已创建')
   } catch (error) {
@@ -296,6 +313,7 @@ async function renameApiGroup(node: ApiGroupNode) {
     )
     const group = await api.groups.update(node.id, { name: normalizeGroupName(result.value) })
     selectedGroupPath.value = group.path
+    activeGroupActionPath.value = null
     await load()
     ElMessage.success('目录已重命名')
   } catch (error) {
@@ -312,6 +330,7 @@ async function removeApiGroup(node: ApiGroupNode) {
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
     )
     await api.groups.remove(node.id)
+    activeGroupActionPath.value = null
     if (selectedGroupPath.value === node.path || selectedGroupPath.value.startsWith(`${node.path}/`)) {
       selectedGroupPath.value = normalizeGroupPath(node.path.slice(0, node.path.lastIndexOf('/')))
     }
@@ -409,6 +428,7 @@ async function load() {
     templates.value = []
     assertions.value = []
     selectedGroupPath.value = '/'
+    activeGroupActionPath.value = null
     return
   }
   try {
@@ -1327,6 +1347,7 @@ watch(projectId, () => {
   apiPage.value = 1
   templatePage.value = 1
   selectedGroupPath.value = '/'
+  activeGroupActionPath.value = null
   void load()
 }, { immediate: true })
 watch(activeTab, (tab) => {
@@ -1396,8 +1417,17 @@ watch([apiSearch, selectedGroupPath], () => { apiPage.value = 1 })
           <div class="api-group-node" :title="data.path">
             <span>{{ data.label }}</span>
             <div class="api-group-node-tools">
-              <small>{{ data.count }}</small>
-              <div class="api-group-actions" @click.stop>
+              <small class="api-group-count">{{ data.count }}</small>
+              <el-button
+                v-if="activeGroupActionPath !== data.path"
+                class="api-group-menu-trigger"
+                link
+                :icon="MoreFilled"
+                :aria-label="`打开${data.label}的目录操作`"
+                title="更多操作"
+                @click.stop="toggleGroupActions(data.path)"
+              />
+              <div v-else class="api-group-actions" @click.stop>
                 <el-button
                   class="api-group-action"
                   link
