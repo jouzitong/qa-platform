@@ -9,6 +9,7 @@
 - 项目空间：隔离 API、流程和项目级变量。
 - API 模板：在项目内统一维护基础地址、公共请求头、查询参数、超时、参数说明和参考案例。
 - API 资产：支持 HTTP / WebSocket，记录功能说明、参数文档、参考案例并可直接执行。
+- API 目录：API 可归入类似 `/用户服务/用户管理` 的多级业务目录，列表支持按父目录筛选子目录；目录节点悬浮后可新增、重命名和删除空目录。
 - 流程编排：按顺序组合 API，支持步骤开关、请求覆盖和拖动式顺序调整（当前为上移/下移）。
 - 上下文：按 `项目变量 < 流程变量 < 本次输入 < 步骤提取值` 的优先级合并。
 - 模板：在 URL、请求头、查询参数、Body、WS 消息中使用 `{{ variable.path }}`。
@@ -105,6 +106,16 @@ docker compose up --build
 ```
 
 访问 <http://localhost:8080>。
+
+为当前本地演示项目补充一组完整的用户管理 API（幂等，可重复执行）：
+
+```bash
+cd backend
+.venv/bin/python ../scripts/seed-user-apis.py \
+  --project-id 62a2cfa1-4aac-4bf1-9b7e-e907d05b4b37
+```
+
+示例会创建 `GET/POST/PATCH/DELETE /api/v1/users` 相关接口，并归入 `/用户服务/用户管理`；如果项目中存在网关 HTTP 模板和默认成功条件，会自动绑定它们。
 
 ## 配置示例
 
@@ -211,7 +222,9 @@ HTTP API 请求配置：
 
 - `Project`：项目及默认变量。
 - `ApiTemplate`：项目级 HTTP/WS 公共配置，可被多个 API 实时引用。
+- `ApiGroup`：项目级持久化 API 目录；根目录 `/` 为虚拟目录，API 创建或导入时会自动补齐路径目录。
 - `ApiDefinition`：协议、请求定义、参数说明与案例。
+- `ApiDefinition.group_path`：API 的规范化业务目录路径；`/` 表示未分组，目录不参与 `key` 唯一性。
 - `AssertionDefinition`：项目级成功条件、引擎配置、默认参数和严重级别。
 - `ApiDefinition.success_assertion_id`：API 直接引用的成功条件。
 - `TestFlow`：流程变量及有序步骤定义。

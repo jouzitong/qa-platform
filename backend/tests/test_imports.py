@@ -28,6 +28,7 @@ def make_archive(*, name: str = "imported-project", api_name: str = "健康检�
                 {
                     "id": "source-api-1",
                     "key": "health",
+                    "group_path": "/系统/健康检查",
                     "name": api_name,
                     "protocol": "http",
                     "success_assertion_key": "success",
@@ -115,6 +116,7 @@ def test_import_preview_requires_approval_and_applies_assets_atomically() -> Non
         flows = client.get(f"/api/v1/flows?project_id={project['id']}").json()
         plans = client.get(f"/api/v1/test-plans?project_id={project['id']}").json()
         assert apis[0]["name"] == "健康检查"
+        assert apis[0]["group_path"] == "/系统/健康检查"
         assert apis[0]["request"]["headers"]["Accept"] == "application/vnd.health+json"
         assert apis[0]["request_schema"]["accept"] == "application/vnd.health+json"
         assert apis[0]["request_schema"]["schema"]["required"] == ["status"]

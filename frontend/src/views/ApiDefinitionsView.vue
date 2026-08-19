@@ -9,10 +9,11 @@ import ApiRequestEditor from '../components/ApiRequestEditor.vue'
 import ApiResponseFieldsEditor from '../components/ApiResponseFieldsEditor.vue'
 import PaginationBar from '../components/PaginationBar.vue'
 import { useProjectContext } from '../state/project'
-import type { ApiDefinition, ApiTemplate, AssertionDefinition } from '../types'
+import type { ApiDefinition, ApiGroup, ApiTemplate, AssertionDefinition } from '../types'
 import { parseJson, pretty } from '../utils'
 
 const definitions = ref<ApiDefinition[]>([])
+const groups = ref<ApiGroup[]>([])
 const templates = ref<ApiTemplate[]>([])
 const assertions = ref<AssertionDefinition[]>([])
 const { projectId } = useProjectContext()
@@ -38,8 +39,17 @@ const executeAdvancedOpen = ref<string[]>([])
 const executeValues = reactive<Record<string, unknown>>({})
 const pathParameterNames = ref<string[]>([])
 const parameterEditor = ref<InstanceType<typeof ApiParametersEditor> | null>(null)
+type ApiGroupNode = {
+  id?: string
+  path: string
+  label: string
+  count: number
+  children: ApiGroupNode[]
+}
+
+const selectedGroupPath = ref('/')
 const form = reactive({
-  key: '', name: '', protocol: 'http' as 'http' | 'ws', template_id: null as string | null,
+  key: '', group_path: '/', name: '', protocol: 'http' as 'http' | 'ws', template_id: null as string | null,
   success_assertion_id: undefined as string | null | undefined,
   description: '', request: '{}', request_schema: '{}', response_schema: '{}',
   response_unpack: '{}', parameters: '[]', examples: '[]', success_contract: '{}', response_variants: '[]',
@@ -62,14 +72,73 @@ const commonAcceptOptions = [
 const availableTemplates = computed(() =>
   templates.value.filter((template) => template.protocol === form.protocol),
 )
+
+function normalizeGroupPath(value: unknown) {
+  const raw = String(value || '').trim().replace(/\\/g, '/')
+  const segments = raw.split('/').map((segment) => segment.trim()).filter(Boolean)
+  return segments.length ? `/${segments.join('/')}` : '/'
+}
+
+const apiGroupTree = computed<ApiGroupNode[]>(() => {
+  const root: ApiGroupNode = { path: '/', label: '全部 API', count: 0, children: [] }
+  const nodesByPath = new Map<string, ApiGroupNode>([[root.path, root]])
+
+  const ensureNode = (path: string, label?: string) => {
+    const normalized = normalizeGroupPath(path)
+    if (normalized === '/') return root
+    const segments = normalized.split('/').filter(Boolean)
+    let parent = root
+    segments.forEach((segment, index) => {
+      const childPath = `/${segments.slice(0, index + 1).join('/')}`
+      let child = nodesByPath.get(childPath)
+      if (!child) {
+        child = { path: childPath, label: segment, count: 0, children: [] }
+        nodesByPath.set(childPath, child)
+        parent.children.push(child)
+      }
+      if (index === segments.length - 1 && label) child.label = label
+      parent = child
+    })
+    return parent
+  }
+
+  for (const group of groups.value) {
+    const node = ensureNode(group.path, group.name)
+    node.id = group.id
+  }
+  for (const definition of definitions.value) {
+    root.count += 1
+    const path = normalizeGroupPath(definition.group_path)
+    if (path === '/') continue
+    let parent = root
+    const segments = path.split('/').filter(Boolean)
+    segments.forEach((segment, index) => {
+      const childPath = `/${segments.slice(0, index + 1).join('/')}`
+      const child = ensureNode(childPath, segment)
+      child.count += 1
+      parent = child
+    })
+  }
+  const sortNodes = (nodes: ApiGroupNode[]) => {
+    nodes.sort((left, right) => left.label.localeCompare(right.label, 'zh-CN'))
+    nodes.forEach((node) => sortNodes(node.children))
+  }
+  sortNodes(root.children)
+  return [root]
+})
+
 const filteredDefinitions = computed(() => {
   const keyword = apiSearch.value.trim().toLocaleLowerCase()
-  if (!keyword) return definitions.value
-  return definitions.value.filter((definition) => (
-    definition.name.toLocaleLowerCase().includes(keyword)
-    || definition.key.toLocaleLowerCase().includes(keyword)
-    || requestTarget(definition).toLocaleLowerCase().includes(keyword)
-  ))
+  const selected = normalizeGroupPath(selectedGroupPath.value)
+  return definitions.value.filter((definition) => {
+    const path = normalizeGroupPath(definition.group_path)
+    if (selected !== '/' && path !== selected && !path.startsWith(`${selected}/`)) return false
+    if (!keyword) return true
+    return definition.name.toLocaleLowerCase().includes(keyword)
+      || definition.key.toLocaleLowerCase().includes(keyword)
+      || path.toLocaleLowerCase().includes(keyword)
+      || requestTarget(definition).toLocaleLowerCase().includes(keyword)
+  })
 })
 const pagedDefinitions = computed(() => filteredDefinitions.value.slice(
   (apiPage.value - 1) * apiPageSize.value, apiPage.value * apiPageSize.value,
@@ -171,6 +240,88 @@ function addParameter() {
   parameterEditor.value?.add()
 }
 
+function selectApiGroup(node: ApiGroupNode) {
+  selectedGroupPath.value = node.path
+}
+
+function normalizeGroupName(value: unknown) {
+  const name = String(value || '').trim()
+  if (!name) return ''
+  if (name.includes('/') || name.includes('\\') || name === '.' || name === '..') return ''
+  return name
+}
+
+function isMessageBoxCancelled(error: unknown) {
+  return error === 'cancel' || error === 'close'
+}
+
+async function createApiGroup(parent: ApiGroupNode) {
+  if (!projectId.value) return
+  try {
+    const result = await ElMessageBox.prompt(
+      `在“${parent.path === '/' ? '全部 API' : parent.path}”下新建目录`,
+      '新建目录',
+      {
+        inputPlaceholder: '例如：用户管理',
+        confirmButtonText: '创建',
+        cancelButtonText: '取消',
+        inputValidator: (value: string) => normalizeGroupName(value) ? true : '请输入不含斜杠的目录名称',
+      },
+    )
+    const group = await api.groups.create({
+      project_id: projectId.value,
+      parent_path: parent.path,
+      name: normalizeGroupName(result.value),
+    })
+    selectedGroupPath.value = group.path
+    await load()
+    ElMessage.success('目录已创建')
+  } catch (error) {
+    if (!isMessageBoxCancelled(error)) ElMessage.error((error as Error).message)
+  }
+}
+
+async function renameApiGroup(node: ApiGroupNode) {
+  if (!node.id) return
+  try {
+    const result = await ElMessageBox.prompt(
+      `修改目录“${node.path}”的名称`,
+      '编辑目录',
+      {
+        inputValue: node.label,
+        confirmButtonText: '保存',
+        cancelButtonText: '取消',
+        inputValidator: (value: string) => normalizeGroupName(value) ? true : '请输入不含斜杠的目录名称',
+      },
+    )
+    const group = await api.groups.update(node.id, { name: normalizeGroupName(result.value) })
+    selectedGroupPath.value = group.path
+    await load()
+    ElMessage.success('目录已重命名')
+  } catch (error) {
+    if (!isMessageBoxCancelled(error)) ElMessage.error((error as Error).message)
+  }
+}
+
+async function removeApiGroup(node: ApiGroupNode) {
+  if (!node.id) return
+  try {
+    await ElMessageBox.confirm(
+      `删除目录“${node.path}”？仅空目录可以删除。`,
+      '确认删除',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+    )
+    await api.groups.remove(node.id)
+    if (selectedGroupPath.value === node.path || selectedGroupPath.value.startsWith(`${node.path}/`)) {
+      selectedGroupPath.value = normalizeGroupPath(node.path.slice(0, node.path.lastIndexOf('/')))
+    }
+    await load()
+    ElMessage.success('目录已删除')
+  } catch (error) {
+    if (!isMessageBoxCancelled(error)) ElMessage.error((error as Error).message)
+  }
+}
+
 function protocolScheme(protocol: 'http' | 'ws') {
   return protocol === 'ws' ? 'ws' : 'http'
 }
@@ -207,7 +358,6 @@ const inheritedRequestBase = computed(() => {
   const request = findTemplate(form.template_id)?.request || {}
   return String(request.base_url || request.url || '')
 })
-const displayRequestBase = computed(() => withProtocol(inheritedRequestBase.value, form.protocol))
 const requestAddress = computed(() => {
   const request = requestConfig.value
   const path = String(request.path || '')
@@ -253,11 +403,18 @@ function updateRequestTarget(value: string) {
   syncPathParameters(parsePathParameterNames(value))
 }
 async function load() {
-  if (!projectId.value) { definitions.value = []; templates.value = []; assertions.value = []; return }
+  if (!projectId.value) {
+    definitions.value = []
+    groups.value = []
+    templates.value = []
+    assertions.value = []
+    selectedGroupPath.value = '/'
+    return
+  }
   try {
-    ;[definitions.value, templates.value, assertions.value] = await Promise.all([
-      api.definitions.list(projectId.value), api.templates.list(projectId.value),
-      api.assertionDefinitions.list(projectId.value),
+    ;[definitions.value, groups.value, templates.value, assertions.value] = await Promise.all([
+      api.definitions.list(projectId.value), api.groups.list(projectId.value),
+      api.templates.list(projectId.value), api.assertionDefinitions.list(projectId.value),
     ])
   }
   catch (error) { ElMessage.error((error as Error).message) }
@@ -882,7 +1039,7 @@ function effectiveParameterCount(definition: ApiDefinition) {
 function openCreate() {
   if (!projectId.value) { ElMessage.warning('请先选择项目'); return }
   editingId.value = ''
-  Object.assign(form, { key: '', name: '', protocol: 'http', template_id: null, success_assertion_id: undefined, description: '', request: pretty(defaultRequest('http')), request_schema: pretty(defaultRequestSchema('http')), response_schema: pretty(defaultResponseSchema('http')), response_unpack: pretty(defaultResponseUnpack('http')), parameters: '[]', examples: '[]', success_contract: pretty(defaultSuccessContract('http')), response_variants: '[]' })
+  Object.assign(form, { key: '', group_path: selectedGroupPath.value === '/' ? '/' : selectedGroupPath.value, name: '', protocol: 'http', template_id: null, success_assertion_id: undefined, description: '', request: pretty(defaultRequest('http')), request_schema: pretty(defaultRequestSchema('http')), response_schema: pretty(defaultResponseSchema('http')), response_unpack: pretty(defaultResponseUnpack('http')), parameters: '[]', examples: '[]', success_contract: pretty(defaultSuccessContract('http')), response_variants: '[]' })
   editorMode.value = 'visual'
   editorConfigTab.value = 'request'
   requestPreviewOpen.value = false
@@ -893,7 +1050,7 @@ function openCreate() {
 
 function openEdit(row: ApiDefinition) {
   editingId.value = row.id
-  Object.assign(form, { key: row.key, name: row.name, protocol: row.protocol, template_id: row.template_id, success_assertion_id: row.success_assertion_id, description: row.description, request: pretty(row.request), request_schema: pretty(requestSchemaFor(row)), response_schema: pretty(responseSchemaFor(row)), response_unpack: pretty(responseUnpackFor(row)), parameters: pretty(row.parameters), examples: pretty(row.examples), success_contract: pretty(Object.keys(row.success_contract || {}).length ? row.success_contract : defaultSuccessContract(row.protocol)), response_variants: pretty(row.response_variants) })
+  Object.assign(form, { key: row.key, group_path: normalizeGroupPath(row.group_path), name: row.name, protocol: row.protocol, template_id: row.template_id, success_assertion_id: row.success_assertion_id, description: row.description, request: pretty(row.request), request_schema: pretty(requestSchemaFor(row)), response_schema: pretty(responseSchemaFor(row)), response_unpack: pretty(responseUnpackFor(row)), parameters: pretty(row.parameters), examples: pretty(row.examples), success_contract: pretty(Object.keys(row.success_contract || {}).length ? row.success_contract : defaultSuccessContract(row.protocol)), response_variants: pretty(row.response_variants) })
   editorMode.value = 'visual'
   editorConfigTab.value = 'request'
   requestPreviewOpen.value = false
@@ -939,6 +1096,7 @@ function advancedConfig() {
   }
   return {
     key: displayKey.value,
+    group_path: normalizeGroupPath(form.group_path),
     name: form.name,
     protocol: form.protocol,
     template_id: form.template_id,
@@ -970,6 +1128,7 @@ function applyAdvancedDraft() {
     if (value.protocol !== undefined && value.protocol !== 'http' && value.protocol !== 'ws')
       throw new Error('protocol 只能是 http 或 ws')
     form.name = String(value.name || '')
+    form.group_path = normalizeGroupPath(value.group_path)
     form.protocol = (value.protocol || form.protocol) as 'http' | 'ws'
     form.template_id = typeof value.template_id === 'string' ? value.template_id : null
     form.success_assertion_id = typeof value.success_assertion_id === 'string'
@@ -1044,6 +1203,7 @@ async function save() {
     const responseSchema = parseJson<Record<string, unknown>>(form.response_schema, '响应 Schema')
     const responseUnpack = parseJson<Record<string, unknown>>(form.response_unpack, '响应解包配置')
     const successContract = parseJson<Record<string, unknown>>(form.success_contract, '成功契约')
+    form.group_path = normalizeGroupPath(form.group_path)
     if (form.protocol === 'http' && typeof requestSchema.accept === 'string') {
       const accept = requestSchema.accept.trim()
       const headers = request.headers && typeof request.headers === 'object'
@@ -1057,7 +1217,7 @@ async function save() {
       request.headers = headers
     }
     const payload: Record<string, unknown> = {
-      project_id: projectId.value, key: routeKey.value || form.key, name: form.name, protocol: form.protocol,
+      project_id: projectId.value, key: routeKey.value || form.key, group_path: form.group_path, name: form.name, protocol: form.protocol,
       template_id: form.template_id,
       description: form.description,
       request,
@@ -1166,13 +1326,14 @@ async function execute() {
 watch(projectId, () => {
   apiPage.value = 1
   templatePage.value = 1
+  selectedGroupPath.value = '/'
   void load()
 }, { immediate: true })
 watch(activeTab, (tab) => {
   if (tab === 'apis') apiPage.value = 1
   else templatePage.value = 1
 })
-watch(apiSearch, () => { apiPage.value = 1 })
+watch([apiSearch, selectedGroupPath], () => { apiPage.value = 1 })
 </script>
 
 <template>
@@ -1214,23 +1375,80 @@ watch(apiSearch, () => { apiPage.value = 1 })
       />
     </div>
   </Teleport>
-  <el-card v-if="activeTab === 'apis'" class="panel" shadow="never">
-    <el-table class="list-table" :data="pagedDefinitions">
-      <el-table-column prop="name" label="名称" fixed="left" min-width="180" align="center" show-overflow-tooltip />
-      <el-table-column label="URL / 请求目标" min-width="300" align="left" show-overflow-tooltip><template #default="scope"><code>{{ requestTarget(scope.row) }}</code></template></el-table-column>
-      <el-table-column label="协议类型" width="100" align="center"><template #default="scope"><el-tag :type="scope.row.protocol === 'http' ? 'success' : 'warning'" effect="dark">{{ scope.row.protocol.toUpperCase() }}</el-tag></template></el-table-column>
-      <el-table-column prop="key" label="Key" min-width="180" align="center" show-overflow-tooltip />
-      <el-table-column v-if="activeTab === 'apis'" label="Accept" min-width="170" align="center" show-overflow-tooltip><template #default="scope"><code v-if="scope.row.protocol === 'http'">{{ requestSchemaFor(scope.row).accept || '默认 application/json' }}</code><span v-else class="muted">—</span></template></el-table-column>
-      <el-table-column label="模板" min-width="140" align="center"><template #default="scope"><el-tag v-if="findTemplate(scope.row.template_id)" effect="plain">{{ findTemplate(scope.row.template_id)?.name }}</el-tag><span v-else class="muted">无</span></template></el-table-column>
-      <el-table-column label="成功条件" min-width="150" align="center"><template #default="scope"><el-tag v-if="findAssertion(scope.row.success_assertion_id)" type="success" effect="plain">{{ findAssertion(scope.row.success_assertion_id)?.name }}</el-tag><span v-else class="muted">兼容契约</span></template></el-table-column>
-      <el-table-column prop="description" label="功能说明" min-width="190" align="left" show-overflow-tooltip />
-      <el-table-column label="有效参数" width="90" align="center"><template #default="scope">{{ effectiveParameterCount(scope.row) }}</template></el-table-column>
-      <el-table-column label="操作" fixed="right" width="200" align="center"><template #default="scope"><div class="icon-action-group"><el-button class="icon-action-button" link type="success" :icon="VideoPlay" aria-label="执行" @click="openExecute(scope.row)"><span class="icon-action-label">执行</span></el-button><el-button class="icon-action-button" link type="primary" :icon="Edit" aria-label="编辑" @click="openEdit(scope.row)"><span class="icon-action-label">编辑</span></el-button><el-button class="icon-action-button" link type="danger" :icon="Delete" aria-label="删除" @click="remove(scope.row)"><span class="icon-action-label">删除</span></el-button></div></template></el-table-column>
-    </el-table>
-    <div v-if="projectId && !definitions.length" class="empty-state">当前项目还没有 API。</div>
-    <div v-else-if="projectId && !filteredDefinitions.length" class="empty-state">未找到匹配的 API。</div>
-    <div v-if="!projectId" class="empty-state">请先创建一个项目。</div>
-  </el-card>
+  <div v-if="activeTab === 'apis'" class="api-list-layout">
+    <aside class="api-group-sidebar">
+      <div class="api-group-heading">
+        <div><strong>API 目录</strong><span>按业务分组管理接口</span></div>
+        <el-tag size="small" effect="plain">{{ definitions.length }}</el-tag>
+      </div>
+      <el-tree
+        class="api-group-tree"
+        :data="apiGroupTree"
+        node-key="path"
+        highlight-current
+        default-expand-all
+        :current-node-key="selectedGroupPath"
+        :props="{ label: 'label', children: 'children' }"
+        aria-label="API 分组目录"
+        @node-click="selectApiGroup"
+      >
+        <template #default="{ data }">
+          <div class="api-group-node" :title="data.path">
+            <span>{{ data.label }}</span>
+            <div class="api-group-node-tools">
+              <small>{{ data.count }}</small>
+              <div class="api-group-actions" @click.stop>
+                <el-button
+                  class="api-group-action"
+                  link
+                  :icon="Plus"
+                  :aria-label="`在${data.label}下新增目录`"
+                  title="新增子目录"
+                  @click.stop="createApiGroup(data)"
+                />
+                <template v-if="data.id">
+                  <el-button
+                    class="api-group-action"
+                    link
+                    :icon="Edit"
+                    :aria-label="`编辑${data.label}`"
+                    title="编辑目录"
+                    @click.stop="renameApiGroup(data)"
+                  />
+                  <el-button
+                    class="api-group-action is-danger"
+                    link
+                    :icon="Delete"
+                    :aria-label="`删除${data.label}`"
+                    title="删除目录"
+                    @click.stop="removeApiGroup(data)"
+                  />
+                </template>
+              </div>
+            </div>
+          </div>
+        </template>
+      </el-tree>
+    </aside>
+    <el-card class="panel api-list-content" shadow="never">
+      <el-table class="list-table" :data="pagedDefinitions">
+        <el-table-column prop="name" label="名称" fixed="left" min-width="180" align="center" show-overflow-tooltip />
+        <el-table-column label="分组目录" min-width="190" align="left" show-overflow-tooltip><template #default="scope"><code class="api-group-path">{{ normalizeGroupPath(scope.row.group_path) }}</code></template></el-table-column>
+        <el-table-column label="URL / 请求目标" min-width="300" align="left" show-overflow-tooltip><template #default="scope"><code>{{ requestTarget(scope.row) }}</code></template></el-table-column>
+        <el-table-column label="协议类型" width="100" align="center"><template #default="scope"><el-tag :type="scope.row.protocol === 'http' ? 'success' : 'warning'" effect="dark">{{ scope.row.protocol.toUpperCase() }}</el-tag></template></el-table-column>
+        <el-table-column prop="key" label="Key" min-width="180" align="center" show-overflow-tooltip />
+        <el-table-column label="Accept" min-width="170" align="center" show-overflow-tooltip><template #default="scope"><code v-if="scope.row.protocol === 'http'">{{ requestSchemaFor(scope.row).accept || '默认 application/json' }}</code><span v-else class="muted">—</span></template></el-table-column>
+        <el-table-column label="模板" min-width="140" align="center"><template #default="scope"><el-tag v-if="findTemplate(scope.row.template_id)" effect="plain">{{ findTemplate(scope.row.template_id)?.name }}</el-tag><span v-else class="muted">无</span></template></el-table-column>
+        <el-table-column label="成功条件" min-width="150" align="center"><template #default="scope"><el-tag v-if="findAssertion(scope.row.success_assertion_id)" type="success" effect="plain">{{ findAssertion(scope.row.success_assertion_id)?.name }}</el-tag><span v-else class="muted">兼容契约</span></template></el-table-column>
+        <el-table-column prop="description" label="功能说明" min-width="190" align="left" show-overflow-tooltip />
+        <el-table-column label="有效参数" width="90" align="center"><template #default="scope">{{ effectiveParameterCount(scope.row) }}</template></el-table-column>
+        <el-table-column label="操作" fixed="right" width="200" align="center"><template #default="scope"><div class="icon-action-group"><el-button class="icon-action-button" link type="success" :icon="VideoPlay" aria-label="执行" @click="openExecute(scope.row)"><span class="icon-action-label">执行</span></el-button><el-button class="icon-action-button" link type="primary" :icon="Edit" aria-label="编辑" @click="openEdit(scope.row)"><span class="icon-action-label">编辑</span></el-button><el-button class="icon-action-button" link type="danger" :icon="Delete" aria-label="删除" @click="remove(scope.row)"><span class="icon-action-label">删除</span></el-button></div></template></el-table-column>
+      </el-table>
+      <div v-if="projectId && !definitions.length" class="empty-state">当前项目还没有 API。</div>
+      <div v-else-if="projectId && !filteredDefinitions.length" class="empty-state">当前目录下未找到匹配的 API。</div>
+      <div v-if="!projectId" class="empty-state">请先创建一个项目。</div>
+    </el-card>
+  </div>
 
   <el-card v-else class="panel" shadow="never">
     <el-table class="list-table" :data="pagedTemplates">
@@ -1293,6 +1511,7 @@ watch(apiSearch, () => { apiPage.value = 1 })
               <el-option v-for="item in availableTemplates" :key="item.id" :label="item.name" :value="item.id" />
             </el-select>
           </el-form-item>
+          <el-form-item label="分组目录" class="api-group-path-field"><el-input v-model="form.group_path" placeholder="例如：/用户服务/用户管理" /></el-form-item>
         </div>
         <div class="api-target-grid" :class="{ 'is-ws': form.protocol === 'ws' }">
           <el-form-item label="协议" class="api-protocol-field">
@@ -1313,11 +1532,6 @@ watch(apiSearch, () => { apiPage.value = 1 })
         </div>
         <el-form-item label="功能说明" class="api-description-field"><el-input v-model="form.description" type="textarea" :rows="1" placeholder="简要说明这个 API 做什么、适用于什么场景" /></el-form-item>
           </section>
-
-          <div v-if="findTemplate(form.template_id)" class="inheritance-notice">
-        <div><strong>已继承 {{ findTemplate(form.template_id)?.name }}</strong><span>基础地址、公共请求头和超时会自动合并，当前 API 只需填写差异。</span></div>
-        <code>{{ displayRequestBase }}</code>
-          </div>
 
           <el-tabs v-model="editorConfigTab" class="api-config-tabs" aria-label="API 配置模块">
             <el-tab-pane label="请求配置" name="request">
@@ -1365,7 +1579,6 @@ watch(apiSearch, () => { apiPage.value = 1 })
                             <span>{{ item.name }}</span><code class="select-option-key">{{ item.key }}</code>
                           </el-option>
                         </el-select>
-                        <div class="muted">API 只执行这一个成功条件；未选择时保留历史成功契约兼容逻辑。</div>
                       </el-form-item>
                     </div>
                   </div>

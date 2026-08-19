@@ -1,5 +1,7 @@
 import json
 from collections.abc import Generator
+from datetime import UTC, datetime
+from uuid import uuid4
 
 from sqlalchemy import create_engine, event, inspect
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
@@ -14,6 +16,33 @@ class Base(DeclarativeBase):
 connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
 engine = create_engine(settings.database_url, connect_args=connect_args)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
+
+
+def _normalize_legacy_group_path(value: object | None) -> str:
+    raw = str(value or "").strip().replace("\\", "/")
+    segments = [segment.strip() for segment in raw.split("/") if segment.strip()]
+    return "/" + "/".join(segments) if segments else "/"
+
+
+def _backfill_api_groups(connection) -> None:
+    """Persist directory chains for API paths created before api_groups existed."""
+    rows = connection.exec_driver_sql(
+        "SELECT DISTINCT project_id, group_path FROM api_definitions "
+        "WHERE group_path IS NOT NULL AND trim(group_path) <> ''"
+    ).fetchall()
+    timestamp = datetime.now(UTC).replace(tzinfo=None).isoformat(sep=" ")
+    for project_id, raw_path in rows:
+        normalized = _normalize_legacy_group_path(raw_path)
+        if normalized == "/":
+            continue
+        current_path = ""
+        for segment in normalized.strip("/").split("/"):
+            current_path = f"{current_path}/{segment}"
+            connection.exec_driver_sql(
+                "INSERT OR IGNORE INTO api_groups "
+                "(id, project_id, path, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (str(uuid4()), project_id, current_path, segment, timestamp, timestamp),
+            )
 
 
 if settings.database_url.startswith("sqlite"):
@@ -71,6 +100,16 @@ def ensure_schema_compatibility() -> None:
             connection.exec_driver_sql(
                 "ALTER TABLE api_definitions ADD COLUMN success_assertion_id VARCHAR(36)"
             )
+        if "group_path" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE api_definitions ADD COLUMN group_path VARCHAR(240) DEFAULT '/'"
+            )
+        connection.exec_driver_sql(
+            "UPDATE api_definitions SET group_path = '/' "
+            "WHERE group_path IS NULL OR trim(group_path) = ''"
+        )
+        if "api_groups" in tables:
+            _backfill_api_groups(connection)
         if "assertion_profile_id" in columns and "assertion_profiles" in tables:
             legacy_rows = connection.exec_driver_sql(
                 "SELECT id, project_id, assertion_profile_id FROM api_definitions "

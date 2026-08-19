@@ -44,6 +44,7 @@ export interface ApiDefinition {
   id: string
   project_id: string
   key: string
+  group_path: string
   template_id: string | null
   success_assertion_id: string | null
   name: string
@@ -57,6 +58,15 @@ export interface ApiDefinition {
   examples: Record<string, unknown>[]
   success_contract: Record<string, unknown>
   response_variants: Record<string, unknown>[]
+  created_at: string
+  updated_at: string
+}
+
+export interface ApiGroup {
+  id: string
+  project_id: string
+  path: string
+  name: string
   created_at: string
   updated_at: string
 }

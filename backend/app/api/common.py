@@ -7,6 +7,13 @@ from sqlalchemy.orm import Session
 ModelT = TypeVar("ModelT")
 
 
+def normalize_group_path(value: object | None) -> str:
+    """Return the canonical slash-separated path used by API directories."""
+    raw = str(value or "").strip().replace("\\", "/")
+    segments = [segment.strip() for segment in raw.split("/") if segment.strip()]
+    return "/" + "/".join(segments) if segments else "/"
+
+
 def get_or_404(session: Session, model: type[ModelT], item_id: str, label: str) -> ModelT:
     item = session.get(model, item_id)
     if not item:

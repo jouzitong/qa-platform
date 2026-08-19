@@ -1,5 +1,6 @@
 import type {
   ApiDefinition,
+  ApiGroup,
   ApiTemplate,
   ImportSession,
   AssertionDefinition,
@@ -88,6 +89,15 @@ export const api = {
         method: 'POST',
         body: JSON.stringify({ inputs, request: requestOverride }),
       }),
+  },
+  groups: {
+    list: (projectId?: string) =>
+      request<ApiGroup[]>(`/api-groups${projectId ? `?project_id=${projectId}` : ''}`),
+    create: (payload: { project_id: string; parent_path?: string; name: string }) =>
+      request<ApiGroup>('/api-groups', { method: 'POST', body: JSON.stringify(payload) }),
+    update: (id: string, payload: { name: string }) =>
+      request<ApiGroup>(`/api-groups/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+    remove: (id: string) => request<void>(`/api-groups/${id}`, { method: 'DELETE' }),
   },
   assertionDefinitions: {
     list: (projectId?: string) =>

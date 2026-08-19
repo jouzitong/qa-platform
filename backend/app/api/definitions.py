@@ -7,7 +7,8 @@ from jsonschema.exceptions import SchemaError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.common import commit_or_conflict, get_or_404
+from app.api.common import commit_or_conflict, get_or_404, normalize_group_path
+from app.api.groups import ensure_api_group_path
 from app.database import get_session
 from app.execution.context import deep_merge
 from app.execution.expression import ExpressionError, parse_expression
@@ -87,7 +88,9 @@ def _normalize_response_unpack(
     if not enabled:
         return {"enabled": False}
     if protocol != "http":
-        raise HTTPException(status_code=422, detail="response_unpack is only supported for HTTP APIs")
+        raise HTTPException(
+            status_code=422, detail="response_unpack is only supported for HTTP APIs"
+        )
 
     source = response_unpack.get("source")
     if not isinstance(source, str) or not source.strip():
@@ -235,6 +238,8 @@ def create_api(payload: ApiCreate, session: Session = Depends(get_session)) -> A
         success_contract = {**success_contract, "body_schema": response_schema}
     _validate_success_contract(payload.protocol, success_contract)
     values = payload.model_dump(exclude={"success_assertion_id"})
+    values["group_path"] = normalize_group_path(payload.group_path)
+    ensure_api_group_path(session, payload.project_id, values["group_path"])
     if payload.protocol == "http":
         values["request"] = _with_default_http_headers(payload.request, payload.request_schema)
     values["success_contract"] = success_contract
@@ -262,6 +267,8 @@ def update_api(
     definition = get_or_404(session, ApiDefinition, api_id, "API")
     values = payload.model_dump(exclude_unset=True)
     target_protocol = values.get("protocol", definition.protocol)
+    values["group_path"] = normalize_group_path(values.get("group_path", definition.group_path))
+    ensure_api_group_path(session, definition.project_id, values["group_path"])
     target_template_id = values.get("template_id", definition.template_id)
     target_assertion_id = values.get("success_assertion_id", definition.success_assertion_id)
     _validate_template(

@@ -30,6 +30,7 @@ class Project(TimestampMixin, Base):
     variables: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
     apis: Mapped[list["ApiDefinition"]] = relationship(cascade="all, delete-orphan")
+    api_groups: Mapped[list["ApiGroup"]] = relationship(cascade="all, delete-orphan")
     api_templates: Mapped[list["ApiTemplate"]] = relationship(cascade="all, delete-orphan")
     assertion_definitions: Mapped[list["AssertionDefinition"]] = relationship(
         cascade="all, delete-orphan"
@@ -56,6 +57,20 @@ class ImportSession(TimestampMixin, Base):
     warnings: Mapped[list[str]] = mapped_column(JSON, default=list)
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     applied_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class ApiGroup(TimestampMixin, Base):
+    __tablename__ = "api_groups"
+    __table_args__ = (
+        UniqueConstraint("project_id", "path", name="uq_api_group_project_path"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    path: Mapped[str] = mapped_column(String(240), index=True)
+    name: Mapped[str] = mapped_column(String(120))
 
 
 class ApiTemplate(TimestampMixin, Base):
@@ -97,6 +112,7 @@ class ApiDefinition(TimestampMixin, Base):
         ForeignKey("assertion_definitions.id", ondelete="RESTRICT"), nullable=True, index=True
     )
     key: Mapped[str] = mapped_column(String(120), index=True)
+    group_path: Mapped[str] = mapped_column(String(240), default="/", index=True)
     name: Mapped[str] = mapped_column(String(120), index=True)
     protocol: Mapped[str] = mapped_column(String(10), default="http")
     description: Mapped[str] = mapped_column(Text, default="")

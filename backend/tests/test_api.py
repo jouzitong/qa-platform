@@ -164,6 +164,97 @@ def test_asset_keys_are_unique_within_a_project() -> None:
         assert duplicate_flow.status_code == 409
 
 
+def test_api_group_path_is_normalized_and_keeps_key_identity() -> None:
+    with TestClient(app) as client:
+        project = client.post("/api/v1/projects", json={"name": "api-group-project"}).json()
+        created = client.post(
+            "/api/v1/apis",
+            json={
+                "project_id": project["id"],
+                "key": "http:GET:/users",
+                "group_path": r"\\用户服务\\用户管理//",
+                "name": "用户列表",
+                "request": {"method": "GET", "path": "/users"},
+            },
+        )
+        assert created.status_code == 201
+        api = created.json()
+        assert api["group_path"] == "/用户服务/用户管理"
+        assert api["key"] == "http:GET:/users"
+
+        updated = client.patch(
+            f"/api/v1/apis/{api['id']}",
+            json={"group_path": "  /用户服务/成员管理/  "},
+        )
+        assert updated.status_code == 200
+        assert updated.json()["group_path"] == "/用户服务/成员管理"
+        assert {
+            group["path"]
+            for group in client.get(f"/api/v1/api-groups?project_id={project['id']}").json()
+        } == {"/用户服务", "/用户服务/用户管理", "/用户服务/成员管理"}
+
+
+def test_api_group_crud_renames_api_paths_and_protects_non_empty_delete() -> None:
+    with TestClient(app) as client:
+        project = client.post("/api/v1/projects", json={"name": "api-group-crud-project"}).json()
+        user_service = client.post(
+            "/api/v1/api-groups",
+            json={"project_id": project["id"], "name": "用户服务"},
+        )
+        assert user_service.status_code == 201
+        user_service_group = user_service.json()
+        assert user_service_group["path"] == "/用户服务"
+
+        user_management = client.post(
+            "/api/v1/api-groups",
+            json={
+                "project_id": project["id"],
+                "parent_path": "/用户服务",
+                "name": "用户管理",
+            },
+        )
+        assert user_management.status_code == 201
+        user_management_group = user_management.json()
+
+        duplicate = client.post(
+            "/api/v1/api-groups",
+            json={"project_id": project["id"], "name": "用户服务"},
+        )
+        assert duplicate.status_code == 409
+
+        created = client.post(
+            "/api/v1/apis",
+            json={
+                "project_id": project["id"],
+                "key": "users-list",
+                "name": "用户列表",
+                "group_path": "/用户服务/用户管理",
+                "request": {"method": "GET", "path": "/users"},
+            },
+        )
+        assert created.status_code == 201
+        api_id = created.json()["id"]
+
+        renamed = client.patch(
+            f"/api/v1/api-groups/{user_service_group['id']}",
+            json={"name": "客户服务"},
+        )
+        assert renamed.status_code == 200
+        assert renamed.json()["path"] == "/客户服务"
+        assert client.get(f"/api/v1/apis/{api_id}").json()["group_path"] == "/客户服务/用户管理"
+        assert {
+            group["path"]
+            for group in client.get(f"/api/v1/api-groups?project_id={project['id']}").json()
+        } == {"/客户服务", "/客户服务/用户管理"}
+
+        non_empty = client.delete(f"/api/v1/api-groups/{user_service_group['id']}")
+        assert non_empty.status_code == 409
+
+        assert client.delete(f"/api/v1/apis/{api_id}").status_code == 204
+        assert client.delete(f"/api/v1/api-groups/{user_management_group['id']}").status_code == 204
+        assert client.delete(f"/api/v1/api-groups/{user_service_group['id']}").status_code == 204
+
+
 def test_response_unpack_round_trip_and_protocol_validation() -> None:
     with TestClient(app) as client:
         project = client.post(

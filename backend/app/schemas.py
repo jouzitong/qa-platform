@@ -48,6 +48,7 @@ class ImportSessionRead(ORMModel):
 class ApiCreate(BaseModel):
     project_id: str
     key: str = Field(min_length=1, max_length=120)
+    group_path: str = Field(default="/", max_length=240)
     template_id: str | None = None
     success_assertion_id: str | None = None
     name: str = Field(min_length=1, max_length=120)
@@ -65,6 +66,7 @@ class ApiCreate(BaseModel):
 
 class ApiUpdate(BaseModel):
     key: str | None = Field(default=None, min_length=1, max_length=120)
+    group_path: str | None = Field(default=None, max_length=240)
     template_id: str | None = None
     success_assertion_id: str | None = None
     name: str | None = Field(default=None, min_length=1, max_length=120)
@@ -82,6 +84,25 @@ class ApiUpdate(BaseModel):
 
 class ApiRead(ApiCreate, ORMModel):
     id: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ApiGroupCreate(BaseModel):
+    project_id: str
+    name: str = Field(min_length=1, max_length=120)
+    parent_path: str = Field(default="/", max_length=240)
+
+
+class ApiGroupUpdate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
+class ApiGroupRead(ORMModel):
+    id: str
+    project_id: str
+    path: str
+    name: str
     created_at: datetime
     updated_at: datetime
 

@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from copy import deepcopy
-import re
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.api.common import normalize_group_path
 from app.api.definitions import DEFAULT_HTTP_HEADERS
+from app.api.groups import ensure_api_group_path
 from app.execution.context import deep_merge
 from app.models import (
     ApiDefinition,
@@ -50,6 +52,7 @@ COLLECTIONS: tuple[tuple[str, type[Any], str, tuple[str, ...]], ...] = (
         "key",
         (
             "key",
+            "group_path",
             "name",
             "protocol",
             "description",
@@ -97,6 +100,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     },
     "apis": {
         "protocol": "http",
+        "group_path": "/",
         "description": "",
         "request": {},
         "request_schema": {},
@@ -445,6 +449,7 @@ def _incoming_payload(
         if field not in {"template_id", "success_assertion_id", "steps", "items"}
     }
     if collection == "apis":
+        payload["group_path"] = normalize_group_path(payload.get("group_path"))
         payload["response_unpack"] = _normalize_response_unpack(
             str(payload.get("protocol") or "http"),
             payload.get("response_unpack"),
@@ -718,6 +723,8 @@ def _apply_collection(
         payload = _incoming_payload(
             session, collection, record, project_id, existing_maps, package, []
         )
+        if collection == "apis":
+            ensure_api_group_path(session, project_id, payload.get("group_path"))
         if existing is None:
             existing = model(project_id=project_id, **payload)
             session.add(existing)
