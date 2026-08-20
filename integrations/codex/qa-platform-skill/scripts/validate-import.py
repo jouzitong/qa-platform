@@ -10,8 +10,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from api_grouping import group_path_error
 from module_bundle import ModuleBundleError, load_import_source
-from project_config import normalize_project_variables
+from project_config import normalize_project_variables, normalize_service_topology
 
 SECRET_RE = re.compile(
     r"(?:sk-[A-Za-z0-9]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|-----BEGIN (?:RSA|OPENSSH|EC|DSA|PRIVATE) KEY-----)"
@@ -19,6 +20,9 @@ SECRET_RE = re.compile(
 PARAMETER_LOCATIONS = {"path", "query", "header", "body"}
 PARAMETER_TYPES = {"string", "integer", "number", "boolean", "object", "array"}
 RESPONSE_PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+PLATFORM_NAME_MAX_LENGTH = 120
+PLATFORM_KEY_MAX_LENGTH = 120
+PLATFORM_PLAN_VERSION_MAX_LENGTH = 60
 
 
 def parse_args() -> argparse.Namespace:
@@ -30,6 +34,53 @@ def parse_args() -> argparse.Namespace:
 
 def add_error(errors: list[str], message: str) -> None:
     errors.append(message)
+
+
+def validate_bounded_string(
+    value: Any, path: str, max_length: int, errors: list[str]
+) -> None:
+    if isinstance(value, str) and len(value) > max_length:
+        add_error(
+            errors,
+            f"{path} must not exceed {max_length} characters (got {len(value)})",
+        )
+
+
+def validate_api_grouping_metadata(value: Any, errors: list[str]) -> None:
+    """Validate optional scanner metadata without making it an import dependency."""
+    if value in (None, {}):
+        return
+    if not isinstance(value, dict):
+        add_error(errors, "api_grouping must be an object when present")
+        return
+    default_path = value.get("default_path", "/")
+    error = group_path_error(default_path)
+    if error:
+        add_error(errors, f"api_grouping.default_path {error}")
+    rules = value.get("rules", [])
+    if not isinstance(rules, list):
+        add_error(errors, "api_grouping.rules must be a list")
+        return
+    for index, rule in enumerate(rules):
+        path = f"api_grouping.rules[{index}]"
+        if not isinstance(rule, dict):
+            add_error(errors, f"{path} must be an object")
+            continue
+        error = group_path_error(rule.get("group_path"))
+        if error:
+            add_error(errors, f"{path}.group_path {error}")
+        if not isinstance(rule.get("match", {}), dict):
+            add_error(errors, f"{path}.match must be an object")
+
+
+def validate_service_topology_metadata(value: Any, errors: list[str]) -> None:
+    """Validate optional service ownership and route-prefix metadata."""
+    if value in (None, {}):
+        return
+    try:
+        normalize_service_topology(value)
+    except SystemExit as exc:
+        add_error(errors, str(exc))
 
 
 def check_source_refs(value: Any, path: str, errors: list[str]) -> None:
@@ -235,6 +286,12 @@ def validate_assertion_assets(manifest: dict[str, Any], errors: list[str]) -> se
         if key in definition_keys:
             add_error(errors, f"duplicate assertion definition key: {key}")
         definition_keys.add(key)
+        validate_bounded_string(
+            key, f"{path}.key", PLATFORM_KEY_MAX_LENGTH, errors
+        )
+        validate_bounded_string(
+            definition.get("name"), f"{path}.name", PLATFORM_NAME_MAX_LENGTH, errors
+        )
 
     metadata = manifest.get("success_assertions")
     if metadata is not None:
@@ -276,6 +333,9 @@ def validate_api_templates(manifest: dict[str, Any], errors: list[str]) -> set[s
         if name in identities:
             add_error(errors, f"duplicate API template name: {name}")
         identities.add(name)
+        validate_bounded_string(
+            name, f"{path}.name", PLATFORM_NAME_MAX_LENGTH, errors
+        )
         for candidate in (template.get("id"), template.get("key"), name):
             if candidate not in (None, ""):
                 aliases.add(str(candidate))
@@ -310,6 +370,9 @@ def validate(manifest: Any) -> tuple[list[str], list[str]]:
         for field in ("key", "name"):
             if not isinstance(project.get(field), str) or not project[field].strip():
                 add_error(errors, f"project.{field} must be a non-empty string")
+        validate_bounded_string(
+            project.get("name"), "project.name", PLATFORM_NAME_MAX_LENGTH, errors
+        )
         try:
             normalize_project_variables(project.get("variables"), require_base_url=True)
         except SystemExit as exc:
@@ -321,6 +384,9 @@ def validate(manifest: Any) -> tuple[list[str], list[str]]:
             add_error(errors, "language must be an object when present")
         elif not isinstance(language.get("code"), str) or not language["code"].strip():
             add_error(errors, "language.code must be a non-empty string")
+
+    validate_api_grouping_metadata(manifest.get("api_grouping"), errors)
+    validate_service_topology_metadata(manifest.get("service_topology"), errors)
 
     storage = manifest.get("storage")
     if storage is not None:
@@ -373,6 +439,12 @@ def validate(manifest: Any) -> tuple[list[str], list[str]]:
                 add_error(errors, f"duplicate interface key: {key}")
             else:
                 interface_keys.add(key)
+            validate_bounded_string(
+                key, f"{path}.key", PLATFORM_KEY_MAX_LENGTH, errors
+            )
+            validate_bounded_string(
+                item.get("name"), f"{path}.name", PLATFORM_NAME_MAX_LENGTH, errors
+            )
             if protocol == "http":
                 if item.get("method") not in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE"}:
                     add_error(errors, f"{path}.method is not a supported HTTP method")
@@ -399,6 +471,10 @@ def validate(manifest: Any) -> tuple[list[str], list[str]]:
                 validate_response_schema_fields(
                     response_schema, f"{path}.response_schema", errors
                 )
+            if "group_path" in item:
+                group_path_issue = group_path_error(item.get("group_path"))
+                if group_path_issue:
+                    add_error(errors, f"{path}.group_path {group_path_issue}")
             validate_response_unpack(
                 item.get("response_unpack", {}),
                 f"{path}.response_unpack",
@@ -496,6 +572,12 @@ def validate(manifest: Any) -> tuple[list[str], list[str]]:
             add_error(errors, f"duplicate flow key: {key}")
         else:
             flow_keys.add(key)
+        validate_bounded_string(
+            key, f"{path}.key", PLATFORM_KEY_MAX_LENGTH, errors
+        )
+        validate_bounded_string(
+            item.get("name"), f"{path}.name", PLATFORM_NAME_MAX_LENGTH, errors
+        )
         for step_index, step in enumerate(item.get("steps", [])):
             if not isinstance(step, dict):
                 add_error(errors, f"{path}.steps[{step_index}] must be an object")
@@ -527,10 +609,22 @@ def validate(manifest: Any) -> tuple[list[str], list[str]]:
             add_error(errors, f"duplicate test plan key: {key}")
         else:
             plan_keys.add(key)
+        validate_bounded_string(
+            key, f"{path}.key", PLATFORM_KEY_MAX_LENGTH, errors
+        )
+        validate_bounded_string(
+            item.get("name"), f"{path}.name", PLATFORM_NAME_MAX_LENGTH, errors
+        )
         if not isinstance(item.get("version"), str) or not item["version"].strip():
             add_error(errors, f"{path}.version must be a non-empty string")
         elif isinstance(package_version, str) and package_version.strip() and item["version"] != package_version:
             add_error(errors, f"{path}.version must equal package_version")
+        validate_bounded_string(
+            item.get("version"),
+            f"{path}.version",
+            PLATFORM_PLAN_VERSION_MAX_LENGTH,
+            errors,
+        )
         items = item.get("items", [])
         if not isinstance(items, list):
             add_error(errors, f"{path}.items must be a list")

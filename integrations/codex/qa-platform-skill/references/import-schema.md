@@ -73,6 +73,25 @@ The scanner emits an authoritative multi-file scan bundle and a compatibility JS
     "http": [],
     "ws": []
   },
+  "api_grouping": {
+    "default_path": "/",
+    "rules": []
+  },
+  "service_topology": {
+    "gateway": {"base_url_variable": "base_url"},
+    "services": [
+      {
+        "key": "app-platform-user",
+        "name": "用户服务",
+        "source_roots": ["app/app-platform-user"],
+        "application_name": "user",
+        "route_prefix": "/user",
+        "group_path": "/用户服务",
+        "server": {"context_path": "/user", "port": 8082},
+        "gateway": {"service_id": "user", "path_prefix": "/user"}
+      }
+    ]
+  },
   "api_templates": [],
   "api_template_discovery": {"enabled": true},
   "assertion_definitions": [],
@@ -94,7 +113,7 @@ The scanner emits an authoritative multi-file scan bundle and a compatibility JS
 }
 ```
 
-`version` is the schema format version. `package_version` is the test/release version used for generated plans and the version directory in the ZIP. They must not be conflated. `source.release_version` records the resolved value, the metadata source, and (when relevant) the raw source value. The resolver uses CLI/config overrides first, then Maven, Python, Node, Gradle, and a root version file. A terminal `-SNAPSHOT` is removed, while other qualifiers are preserved. `language` records the selected display language and its evidence; generated names/descriptions follow it while stable keys remain language-neutral. `storage` records where the scan manifest and archive are kept locally; it is metadata and does not grant the importer filesystem access.
+`version` is the schema format version. `package_version` is the test/release version used for generated plans and the version directory in the ZIP. They must not be conflated. `source.release_version` records the resolved value, the metadata source, and (when relevant) the raw source value. The resolver uses CLI/config overrides first, then Maven, Python, Node, Gradle, and a root version file. A terminal `-SNAPSHOT` is removed, while other qualifiers are preserved. `language` records the selected display language and its evidence; generated names/descriptions follow it while stable keys remain language-neutral. `storage` records where the scan manifest and archive are kept locally; it is metadata and does not grant the importer filesystem access. `api_grouping` records ordered project rules used to assign API `group_path`. `service_topology` records project-owned service source roots, external route prefixes, service directory roots, server settings, and gateway mappings; it is preserved by the module bundle and ZIP, while each imported API still carries its actual `service`, `path`, and `group_path`.
 
 ## Editable module bundle
 
@@ -131,6 +150,32 @@ Derive an API key directly from the normalized protocol, method, and route. Open
 
 Keys are external identifiers. qa-platform should persist the API/flow/plan `key` (or an equivalent external-key field) and use it for upsert and repeat-import detection. Names are display labels and are not safe deduplication keys.
 
+## API directory paths
+
+`group_path` is an optional API organization attribute for backward compatibility with older manifests; newly generated records always include it. `/` means the root directory. Other values must be canonical slash-separated paths such as `/用户服务/用户管理`, with no empty segments, `..`, or backslashes. Changing `group_path` must not change the API `key`.
+
+The project config can define ordered rules:
+
+```json
+{
+  "api_grouping": {
+    "default_path": "/",
+    "rules": [
+      {
+        "group_path": "/用户服务/用户管理",
+        "match": {"tags": ["users"], "path_prefix": "/api/users"}
+      },
+      {
+        "group_path": "/系统",
+        "match": {"paths": ["/health"]}
+      }
+    ]
+  }
+}
+```
+
+The first matching rule wins. If no rule/default applies, the scanner finds the API's service through `service_topology.source_roots`, then combines that service's `group_path` with an OpenAPI/Swagger operation/path/tag extension (`x-qa-platform-group-path`, `x-api-group-path`, or `x-group-path`), hierarchical tag, controller/business hint, or finally URL path segment. For example, service `/用户服务` plus `UserManageController` becomes `/用户服务/UserManage`. Inferred business paths carry a warning for review. The current ZIP importer creates missing directory chains from API `group_path`; no standalone `api_groups.json` module is part of this contract.
+
 ## Interface fields
 
 Every interface should include:
@@ -142,6 +187,7 @@ Every interface should include:
   "method": "GET",
   "path": "/api/orders",
   "name": "List orders",
+  "group_path": "/订单",
   "service": "order-service",
   "parameters": [],
   "request_schema": {"accept": "application/json", "schema": {}},
@@ -158,6 +204,8 @@ Every interface should include:
   "warnings": []
 }
 ```
+
+`name` is a reviewer-facing label and must not exceed 120 characters, matching qa-platform's persisted `ApiDefinition` contract. Keep complete controller/operation prose in `description`. `key` is also limited to 120 characters; validation must reject an oversized stable key instead of relying on SQLite's non-enforced `VARCHAR` length.
 
 Use `protocol: "ws"` for WebSocket records. A WS record may use `url` instead of `path` and may include `handshake`, `messages`, and `receive_count`.
 
@@ -367,14 +415,14 @@ The scanner's `import_decision` is a comparison result, not an instruction to mu
 
 ## Import mapping
 
-Map `project` to `Project`, `api_templates` to `ApiTemplate`, `assertion_definitions` to success conditions, `interfaces.http/ws` to `ApiDefinition`, `flows` to `TestFlow`, and `test_plans` to `TestPlan`. `project.variables.base_url` is required and must be an `ip:port` value without a URL scheme; qa-platform adds `http://` when resolving it. API `template_key` and `success_assertion_key` values resolve to imported or existing assets. `features` and `test_cases` are retained in the scanner JSON and ZIP `inventory.json`; the current qa-platform importer warns and skips them because there is no standalone feature or test-case model. The archive builder maps each API's `success_contract` into the API asset as a compatibility fallback.
+Map `project` to `Project`, `api_templates` to `ApiTemplate`, `assertion_definitions` to success conditions, `interfaces.http/ws` to `ApiDefinition` (including `group_path`), `flows` to `TestFlow`, and `test_plans` to `TestPlan`. `project.variables.base_url` is required and must be an `ip:port` value without a URL scheme; qa-platform adds `http://` when resolving it. API `template_key` and `success_assertion_key` values resolve to imported or existing assets. `features` and `test_cases` are retained in the scanner JSON and ZIP `inventory.json`; the current qa-platform importer warns and skips them because there is no standalone feature or test-case model. The archive builder maps each API's `success_contract` into the API asset as a compatibility fallback.
 
 ## ZIP mapping
 
 The archive consumed by the current import center is:
 
 ```text
-manifest.json       # package_version, source, architecture, import_decision, warnings
+manifest.json       # package_version, API grouping metadata, source, architecture, import_decision, warnings
 project.json        # project metadata and variables
 api_templates.json  # reusable API templates
 inventory.json      # scanner-only features and test_cases

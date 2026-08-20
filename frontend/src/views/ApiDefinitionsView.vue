@@ -1428,31 +1428,37 @@ watch([apiSearch, selectedGroupPath], () => { apiPage.value = 1 })
                 @click.stop="toggleGroupActions(data.path)"
               />
               <div v-else class="api-group-actions" @click.stop>
-                <el-button
-                  class="api-group-action"
-                  link
-                  :icon="Plus"
-                  :aria-label="`在${data.label}下新增目录`"
-                  title="新增子目录"
-                  @click.stop="createApiGroup(data)"
-                />
-                <template v-if="data.id">
+                <el-tooltip :content="`在“${data.label}”下新增目录`" placement="right" :show-after="180">
                   <el-button
                     class="api-group-action"
                     link
-                    :icon="Edit"
-                    :aria-label="`编辑${data.label}`"
-                    title="编辑目录"
-                    @click.stop="renameApiGroup(data)"
+                    :icon="Plus"
+                    :aria-label="`在${data.label}下新增目录`"
+                    title="新增目录"
+                    @click.stop="createApiGroup(data)"
                   />
-                  <el-button
-                    class="api-group-action is-danger"
-                    link
-                    :icon="Delete"
-                    :aria-label="`删除${data.label}`"
-                    title="删除目录"
-                    @click.stop="removeApiGroup(data)"
-                  />
+                </el-tooltip>
+                <template v-if="data.id">
+                  <el-tooltip :content="`编辑目录“${data.label}”`" placement="right" :show-after="180">
+                    <el-button
+                      class="api-group-action"
+                      link
+                      :icon="Edit"
+                      :aria-label="`编辑${data.label}`"
+                      title="编辑目录"
+                      @click.stop="renameApiGroup(data)"
+                    />
+                  </el-tooltip>
+                  <el-tooltip :content="`删除目录“${data.label}”`" placement="right" :show-after="180">
+                    <el-button
+                      class="api-group-action is-danger"
+                      link
+                      :icon="Delete"
+                      :aria-label="`删除${data.label}`"
+                      title="删除目录"
+                      @click.stop="removeApiGroup(data)"
+                    />
+                  </el-tooltip>
                 </template>
               </div>
             </div>

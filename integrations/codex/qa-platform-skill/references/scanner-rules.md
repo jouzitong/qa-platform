@@ -13,6 +13,75 @@ Prefer high-signal sources and retain the discovery method in every record:
 
 Merge records by the normalized route key. Never discard a second source reference because the first source already found the same route. The route key is `http:<METHOD>:<path>` for HTTP and `ws:<path-or-url>` for WebSocket, and it is emitted as the interface `key`. Business labels are used only for feature grouping and display names.
 
+## API directory grouping
+
+Every newly generated API record receives a canonical `group_path`. The path is an organization attribute only; it never participates in the stable route key. `/` is the root directory, and nested paths use `/一级/二级` with no empty segments, `..`, or backslashes.
+
+The optional project configuration is deterministic and ordered:
+
+```json
+{
+  "api_grouping": {
+    "default_path": "/",
+    "rules": [
+      {
+        "group_path": "/用户服务/用户管理",
+        "match": {"tags": ["users"], "path_prefix": "/api/users"}
+      }
+    ]
+  }
+}
+```
+
+`api_groups` is accepted as a compatibility alias for `api_grouping`. A rule can match `protocol`, `method`/`methods`, `key`/`keys`, `path`/`paths`, `path_prefix`, `path_regex`, `operation_id`, `business_key`, `service`, and `tags`; the first matching rule wins and multiple matches produce a warning. `default_path` applies when no rule matches.
+
+When no configured rule/default applies, first identify the API's configured service. If that service has a `group_path`, combine it with the business directory selected from these sources:
+
+1. OpenAPI/Swagger operation, path-item, document, or tag extensions: `x-qa-platform-group-path`, `x-api-group-path`, or `x-group-path`.
+2. An OpenAPI/Swagger hierarchical tag such as `用户服务/用户管理`, or a tag declaration carrying one of the extensions above.
+3. A controller name, service/module name, or business key from source metadata.
+4. The first meaningful static URL segments after removing generic `api`/version segments and path placeholders.
+
+Fallback paths are heuristics and must add a review warning to the API. The importer creates missing directory chains from `group_path`; do not package a separate `api_groups.json` file for the current import contract. Empty directories are managed through the platform directory API/UI.
+
+## Service topology and external routes
+
+Multi-service projects should declare deployment facts in `.qa-platform.json` instead of depending on directory proximity:
+
+```json
+{
+  "service_topology": {
+    "gateway": {
+      "service_key": "app-gateway",
+      "base_url_variable": "base_url"
+    },
+    "services": [
+      {
+        "key": "app-platform-user",
+        "name": "用户服务",
+        "source_roots": ["app/app-platform-user"],
+        "application_name": "user",
+        "route_prefix": "/user",
+        "group_path": "/用户服务",
+        "server": {"context_path": "/user", "port": 8082},
+        "gateway": {
+          "service_id": "user",
+          "route_id": "user-service-route",
+          "path_prefix": "/user"
+        }
+      }
+    ]
+  }
+}
+```
+
+- `source_roots` maps Controllers, DTOs, and route declarations to one service; the most specific matching root wins.
+- `route_prefix` is the final external prefix used in stable HTTP/WS route keys. If omitted, it is derived from `gateway.path_prefix` or `server.context_path + server.servlet_path`.
+- `group_path` is the service directory root. The scanner appends the Controller/OpenAPI/business directory below it.
+- `server` records application context/servlet path and port; `gateway` records the gateway route and service ID. These facts remain metadata in the module manifest and ZIP.
+- Ordered `api_grouping.rules` and a non-root `api_grouping.default_path` override service-derived grouping. Service topology does not rewrite configured OpenAPI/Swagger paths because they may already be externally normalized.
+- Reject absolute/traversing `source_roots`, non-literal route prefixes, duplicate service keys, invalid ports, and an unknown `gateway.service_key`. Missing configured roots produce scan warnings.
+
 ## Standard API document conversion
 
 Read sources in this order: CLI/configured local documents, automatically discovered conventional filenames, explicit configured runtime URLs, then optional framework runtime discovery. Runtime sources are read-only HTTP(S) requests and are used only when the user/config enables them.
@@ -24,7 +93,7 @@ Read sources in this order: CLI/configured local documents, automatically discov
 - Map OpenAPI request JSON media type to request `Content-Type`. Map the selected successful response JSON media type (or Swagger `produces`) to `request_schema.accept`, which materializes as the HTTP `Accept` header.
 - Preserve request fields in `request_schema.schema`, response fields in `response_schema`, and executable request fields in `parameters`. For every resolved JSON object, recursively materialize executable `children` with each layer's required/default/example/description facts; child nodes inherit the root `in` location. Media-level object examples propagate to matching fields.
 - When an OpenAPI/Swagger response document is unavailable, Spring return types provide a secondary response source. Expand typed DTOs recursively, preserve JavaDoc descriptions and enum values, unwrap common transport containers, and represent recognized business envelopes as `code`/`data` with a warning that the wrapper was inferred from source.
-- If a documented field lacks description/example, generate only a deterministic neutral placeholder and add an API warning. If a non-204 successful response has no readable JSON schema, keep it empty and warn rather than letting AI invent a response.
+- If a field lacks description/example, derive a readable identifier label or state explicitly that the source/API contract omitted its business meaning, and add an API warning. Never present generic location/type prose as a discovered business description. If a non-204 successful response has no readable JSON schema, keep it empty and warn rather than letting AI invent a response.
 
 `openapi.runtime_discovery` recognizes conventional paths only when matching framework evidence exists: Springdoc `/v3/api-docs`, Springfox `/v2/api-docs`, FastAPI `/openapi.json`, Nest Swagger `/api-json`, and Swaggo `/swagger/doc.json`. Projects with custom endpoints should configure `openapi.urls` or `runtime_discovery.paths` explicitly.
 
@@ -56,7 +125,7 @@ For Spring Boot/Cloud source routes, inspect module-scoped `application*.yml`, `
 - `spring.mvc.servlet.path`;
 - `spring.webflux.base-path`.
 
-Literal values are normalized as route prefixes and composed with class/method mappings. For example, `server.servlet.context-path=/chat` plus `@GetMapping("/users")` becomes `/chat/users`. The selected configuration line is retained in `source_refs`. When profile files in the same module declare different prefixes, the base `application` file is selected and a warning is emitted because the active runtime profile is not knowable from static scanning. OpenAPI/Swagger paths are left unchanged to avoid duplicating a prefix that is already present in the document.
+Literal values are normalized as route prefixes and composed with class/method mappings. For example, `server.servlet.context-path=/chat` plus `@GetMapping("/users")` becomes `/chat/users`. A matching `service_topology.route_prefix` has precedence and solves the common Maven layout where Controllers and the `boot` application config are sibling modules. The selected static configuration line is retained in `source_refs`; a configured/static mismatch produces a warning. When profile files in the same module declare different prefixes, the base `application` file is selected and a warning is emitted because the active runtime profile is not knowable from static scanning. OpenAPI/Swagger paths are left unchanged to avoid duplicating a prefix that is already present in the document.
 
 ### Success assertion discovery
 
@@ -68,13 +137,13 @@ Each generated API carries `success_assertion_key`, and the manifest/ZIP carries
 
 ## API display names and descriptions
 
-Keep imported API names useful and unique for reviewers. Prefer OpenAPI `summary` / `operationId`, then Spring controller/interface JavaDoc plus method JavaDoc, combining class business context with the method action. Apply the same rule to Spring `WebSocketConfigurer#addHandler` registrations: use the enclosing configuration class and registration-method JavaDoc. Preserve a source-derived name during localization; do not overwrite it with a generic path label. Without comments, use a meaningful Java identifier or route token before a generic fallback. When two display names still collide, append the protocol method and request target deterministically.
+Keep imported API names useful, unique, and no longer than the platform limit of 120 characters. Prefer the first human-facing sentence of OpenAPI `summary` / `operationId`, then Spring controller/interface JavaDoc plus method JavaDoc, combining concise class business context with the method action. Keep longer explanatory prose in `description` instead of the display name. Apply the same rule to Spring `WebSocketConfigurer#addHandler` registrations: use the enclosing configuration class and registration-method JavaDoc. Preserve a source-derived name during localization; do not overwrite it with a generic path label. Without comments, use a meaningful Java identifier or route token before a generic fallback. When two display names still collide, append a bounded protocol method and request target deterministically.
 
 For path-only fallbacks, use meaningful route segments plus the HTTP action. A generic label such as “查询接口” or “虚拟数据业务接口” is insufficient when more specific source context exists. Never invent a business operation that is not documented or indicated by the route.
 
 ## Parameter discovery
 
-Build API parameters with the executable contract in [api-definition-protocol.md](api-definition-protocol.md), not by copying framework/OpenAPI objects verbatim. Every root and recursive child parameter must have a non-empty description and a safe example. Preserve source descriptions/examples when available; otherwise derive a neutral description from location/name/type and a deterministic UI-only example from type, format, or enum. Only emit a default when source/config explicitly declares one. Path placeholders are available for every route source. OpenAPI/Swagger and Spring typed signatures add higher-confidence parameter facts; object fields become `children`, arrays retain `items`, and unsupported multipart, form, scalar, and unresolved body shapes remain warnings instead of fabricated `body` fields.
+Build API parameters with the executable contract in [api-definition-protocol.md](api-definition-protocol.md), not by copying framework/OpenAPI objects verbatim. Every root and recursive child parameter must have a non-empty description and a safe example. Preserve source descriptions/examples when available. For Spring method parameters, use `@Schema`/`@Parameter` and then JavaDoc `@param`; for DTO fields, use `@Schema`, `@Parameter`, `@ApiModelProperty`, `@JsonPropertyDescription`, explicit Bean Validation messages, field JavaDoc, and line comments. Only when all sources are absent may the scanner derive a readable identifier label or explicit review-needed description. Use deterministic UI-only examples from type, format, or enum, and emit a default only when source/config declares one. Object fields become recursive `children`, arrays retain `items`, and unsupported multipart, form, scalar, and unresolved body shapes remain warnings instead of fabricated `body` fields.
 
 ## Confidence
 

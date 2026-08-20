@@ -21,6 +21,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlsplit
 from urllib.request import Request, urlopen
 
+from api_grouping import group_path_from_segments, normalize_group_path
 from flow_documents import load_flow_documents
 from module_bundle import ModuleBundleError, load_import_source, write_module_bundle
 from parameter_protocol import (
@@ -32,6 +33,7 @@ from parameter_protocol import (
 )
 from project_config import (
     load_project_config,
+    normalize_api_grouping,
     normalize_api_templates,
     normalize_api_template_discovery,
     normalize_flow_documents,
@@ -39,6 +41,7 @@ from project_config import (
     normalize_package_version,
     normalize_project_metadata,
     normalize_project_variables,
+    normalize_service_topology,
     normalize_success_assertions,
     normalize_storage,
     resolve_language,
@@ -82,6 +85,7 @@ BUILD_METADATA_NAMES = {"pom.xml", "build.gradle", "build.gradle.kts", "go.mod",
 ARCHITECTURE_SUFFIXES = {".properties"}
 HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE"}
 JAVA_TYPE_MARKER = "x-qa-platform-java-type"
+API_DISPLAY_NAME_MAX_LENGTH = 120
 SPRING_APPLICATION_CONFIG_RE = re.compile(
     r"^(?:application|bootstrap)(?:[-.][A-Za-z0-9_.-]+)?\.(?:properties|ya?ml|json)$",
     re.IGNORECASE,
@@ -562,6 +566,58 @@ def resolve_spring_context_path(
     return selected["prefix"], selected["source_refs"], warnings
 
 
+def resolve_configured_service(
+    path: Path,
+    root: Path,
+    service_topology: dict[str, Any],
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """Map a source file to the most specific configured service source root."""
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return None, []
+    matches: list[tuple[int, dict[str, Any], str]] = []
+    for service in service_topology.get("services", []):
+        if not isinstance(service, dict):
+            continue
+        for raw_source_root in service.get("source_roots", []):
+            source_root = Path(str(raw_source_root))
+            if source_root == Path(".") or _is_relative_to(relative, source_root):
+                matches.append((len(source_root.parts), service, source_root.as_posix()))
+    if not matches:
+        return None, []
+    deepest = max(match[0] for match in matches)
+    selected_matches = [match for match in matches if match[0] == deepest]
+    selected_matches.sort(key=lambda match: (str(match[1].get("key") or ""), match[2]))
+    selected = selected_matches[0][1]
+    warnings: list[str] = []
+    service_keys = sorted({str(match[1].get("key") or "") for match in selected_matches})
+    if len(service_keys) > 1:
+        warnings.append(
+            f"Source {relative.as_posix()} matched multiple service_topology entries "
+            f"at the same depth; selected {selected.get('key')}: {', '.join(service_keys)}"
+        )
+    return selected, warnings
+
+
+def configured_service_context_path(
+    service: dict[str, Any] | None,
+    discovered_prefix: str | None,
+    discovered_refs: list[dict[str, Any]],
+) -> tuple[str | None, list[dict[str, Any]], list[str]]:
+    """Prefer project-owned external route facts over module-local inference."""
+    configured_prefix = str((service or {}).get("route_prefix") or "").strip()
+    if not configured_prefix:
+        return discovered_prefix, discovered_refs, []
+    warnings: list[str] = []
+    if discovered_prefix and discovered_prefix != configured_prefix:
+        warnings.append(
+            f"Service {service.get('key')} route_prefix={configured_prefix} overrides "
+            f"the statically discovered Spring prefix {discovered_prefix}"
+        )
+    return configured_prefix, discovered_refs if discovered_prefix == configured_prefix else [], warnings
+
+
 def discover_router_prefixes(files: list[Path]) -> dict[str, str]:
     """Resolve simple FastAPI include_router aliases across files."""
     imported_modules: dict[str, str] = {}
@@ -752,6 +808,7 @@ def ensure_interface(
     discovery_method: str = "source",
     confidence: float = 0.85,
     language: str | None = "en",
+    service_key: str | None = None,
 ) -> dict[str, Any] | None:
     path = path.strip()
     if not path or not path.startswith(("/", "ws://", "wss://", "http://", "https://")):
@@ -761,7 +818,7 @@ def ensure_interface(
     route_key = interface_key(protocol, method, key_path)
     bucket = interfaces[protocol]
     item = bucket.get(route_key)
-    source_service = service_from_source_ref(root, ref)
+    source_service = str(service_key or service_from_source_ref(root, ref)).strip() or root.name
     if item is None:
         candidate_business_key = business_key or derive_business_key(
             protocol, method, key_path, name=name, operation_id=operation_id
@@ -847,8 +904,28 @@ JAVA_DOC_LINK_RE = re.compile(r"\{@(?:link|code|value)\s+([^}\s]+)(?:\s+[^}]*)?\
 JAVA_DOC_HTML_RE = re.compile(r"<[^>]+>")
 
 
+def _clean_java_doc_text(
+    value: str, *, trim_terminal_punctuation: bool = True
+) -> str:
+    value = JAVA_DOC_LINK_RE.sub(r"\1", value)
+    value = JAVA_DOC_HTML_RE.sub(" ", value)
+    value = " ".join(value.split()).strip()
+    if trim_terminal_punctuation:
+        value = value.rstrip("。！？.!?").strip()
+    return value
+
+
 def _java_doc_summary(value: str) -> str:
     """Extract the first human-facing sentence from a nearby JavaDoc block."""
+    text = _java_doc_description(value)
+    if not text:
+        return ""
+    sentence = re.split(r"(?<=[。！？.!?])\s*", text, maxsplit=1)[0]
+    return sentence.strip().rstrip("。！？.!?").strip()
+
+
+def _java_doc_description(value: str) -> str:
+    """Extract human-facing JavaDoc prose while excluding structured tags."""
     lines: list[str] = []
     for raw_line in value.splitlines():
         line = re.sub(r"^\s*\*?\s?", "", raw_line).strip()
@@ -856,20 +933,17 @@ def _java_doc_summary(value: str) -> str:
             if lines and line.startswith("@"):
                 break
             continue
-        line = JAVA_DOC_LINK_RE.sub(r"\1", line)
-        line = JAVA_DOC_HTML_RE.sub(" ", line)
-        line = " ".join(line.split())
+        # Keep sentence punctuation until after sentence splitting. Removing it
+        # here would merge a short summary line with every following JavaDoc
+        # line and turn the whole paragraph into an API display name.
+        line = _clean_java_doc_text(line, trim_terminal_punctuation=False)
         if line:
             lines.append(line)
-    text = " ".join(lines)
-    if not text:
-        return ""
-    sentence = re.split(r"(?<=[。！？.!?])\s*", text, maxsplit=1)[0]
-    return sentence.strip().rstrip("。！？.!?").strip()
+    return " ".join(lines).strip()
 
 
-def _java_doc_before(text: str, position: int) -> str:
-    """Return a JavaDoc summary when it belongs to the declaration at position."""
+def _java_doc_block_before(text: str, position: int) -> str:
+    """Return the full nearby JavaDoc body, including structured tags."""
     start = max(0, position - 8_000)
     prefix = text[start:position]
     matches = list(JAVA_DOC_RE.finditer(prefix))
@@ -877,11 +951,48 @@ def _java_doc_before(text: str, position: int) -> str:
         return ""
     match = matches[-1]
     gap = prefix[match.end() :]
-    # A closing brace or semicolon means the comment belongs to a preceding
-    # declaration rather than the current class/method annotations.
     if re.search(r"[};]", gap) or gap.count("\n") > 48:
         return ""
-    return _java_doc_summary(match.group("body"))
+    return match.group("body")
+
+
+def _java_doc_before(text: str, position: int) -> str:
+    """Return JavaDoc prose when it belongs to the declaration at position."""
+    return _java_doc_description(_java_doc_block_before(text, position))
+
+
+def _java_doc_param_descriptions(value: str) -> dict[str, str]:
+    """Parse JavaDoc ``@param`` descriptions, including continuation lines."""
+    result: dict[str, str] = {}
+    active_name: str | None = None
+    active_lines: list[str] = []
+
+    def flush() -> None:
+        nonlocal active_name, active_lines
+        if active_name:
+            description = _clean_java_doc_text(" ".join(active_lines))
+            if description:
+                result[active_name] = description
+        active_name = None
+        active_lines = []
+
+    for raw_line in value.splitlines():
+        line = re.sub(r"^\s*\*?\s?", "", raw_line).strip()
+        match = re.match(r"@param\s+(?P<name><[^>]+>|[A-Za-z_$][\w$]*)\s*(?P<body>.*)", line)
+        if match:
+            flush()
+            name = match.group("name")
+            if not name.startswith("<"):
+                active_name = name
+                active_lines = [match.group("body")]
+            continue
+        if line.startswith("@"):
+            flush()
+            continue
+        if active_name and line:
+            active_lines.append(line)
+    flush()
+    return result
 
 
 def _java_identifier_label(value: str, language: str | None) -> str:
@@ -925,19 +1036,55 @@ def _spring_name_and_description(
     method_identifier: str = "",
     language: str | None = "en",
 ) -> tuple[str | None, str | None]:
-    class_summary = class_summary.strip() or _java_identifier_label(class_identifier, language)
-    method_summary = method_summary.strip() or _java_identifier_label(method_identifier, language)
-    if method_summary and class_summary:
-        if method_summary == class_summary or method_summary in class_summary:
-            return class_summary, class_summary
-        if class_summary in method_summary:
-            return method_summary, method_summary
-        return f"{class_summary} - {method_summary}", f"{class_summary}。{method_summary}。"
-    if method_summary:
-        return method_summary, method_summary
-    if class_summary:
-        return class_summary, class_summary
+    class_description = class_summary.strip()
+    method_description = method_summary.strip()
+    class_name = _java_doc_summary(class_description) or _java_identifier_label(
+        class_identifier, language
+    )
+    method_name = _java_doc_summary(method_description) or _java_identifier_label(
+        method_identifier, language
+    )
+    description_parts = [
+        value.rstrip("。！？.!?").strip()
+        for value in (class_description, method_description)
+        if value.strip()
+    ]
+    description = "。".join(description_parts)
+    if description:
+        description += "。"
+    if method_name and class_name:
+        if method_name == class_name or method_name in class_name:
+            return class_name, description or class_name
+        if class_name in method_name:
+            return method_name, description or method_name
+        return f"{class_name} - {method_name}", description or f"{class_name}。{method_name}。"
+    if method_name:
+        return method_name, description or method_name
+    if class_name:
+        return class_name, description or class_name
     return None, None
+
+
+def _bounded_display_name(value: Any, max_length: int = API_DISPLAY_NAME_MAX_LENGTH) -> str:
+    """Return a compact UI label that always fits the platform contract."""
+    normalized = " ".join(str(value or "").split()).strip()
+    if len(normalized) <= max_length:
+        return normalized
+    if max_length <= 1:
+        return normalized[:max_length]
+    prefix = normalized[: max_length - 1].rstrip(" -—/:：，,。；;")
+    return f"{prefix or normalized[: max_length - 1]}…"
+
+
+def _display_name_with_suffix(name: str, suffix: str) -> str:
+    """Fit a collision suffix without dropping the method/route discriminator."""
+    normalized_suffix = " ".join(str(suffix or "").split()).strip()
+    if len(normalized_suffix) >= API_DISPLAY_NAME_MAX_LENGTH:
+        normalized_suffix = _bounded_display_name(
+            normalized_suffix, API_DISPLAY_NAME_MAX_LENGTH // 2
+        )
+    available = max(1, API_DISPLAY_NAME_MAX_LENGTH - len(normalized_suffix))
+    return f"{_bounded_display_name(name, available)}{normalized_suffix}"
 
 
 def parse_python_routes(
@@ -1245,13 +1392,43 @@ def _coerce_java_default(value: Any, schema: dict[str, Any]) -> Any:
     return value
 
 
+def _java_validation_message(value: str) -> str:
+    """Return an explicit human-authored Bean Validation message when present."""
+    for annotation in (
+        "NotNull",
+        "NotBlank",
+        "NotEmpty",
+        "Size",
+        "Pattern",
+        "Min",
+        "Max",
+        "DecimalMin",
+        "DecimalMax",
+        "Positive",
+        "PositiveOrZero",
+        "Negative",
+        "NegativeOrZero",
+        "Email",
+    ):
+        message = _annotation_string(value, annotation, "message", allow_unnamed=False)
+        if message and not re.fullmatch(r"\{[^{}]+\}", message.strip()):
+            return " ".join(message.split())
+    return ""
+
+
 def _java_parameter_metadata(value: str, schema: dict[str, Any]) -> tuple[str, Any | None, Any | None]:
-    description = _annotation_string(value, "Schema", "description") or _annotation_string(
-        value, "Parameter", "description"
-    ) or ""
+    description = (
+        _annotation_string(value, "Schema", "description")
+        or _annotation_string(value, "Parameter", "description")
+        or _annotation_string(value, "ApiModelProperty", "value", allow_unnamed=False)
+        or _annotation_string(value, "ApiModelProperty", "notes", allow_unnamed=False)
+        or _annotation_string(value, "JsonPropertyDescription", "value")
+        or _java_validation_message(value)
+        or ""
+    )
     example = _annotation_string(value, "Schema", "example") or _annotation_string(
         value, "Parameter", "example"
-    )
+    ) or _annotation_string(value, "ApiModelProperty", "example", allow_unnamed=False)
     default = _annotation_string(value, "Schema", "defaultValue", allow_unnamed=False)
     size_min = _annotation_number(value, "Size", "min")
     size_max = _annotation_number(value, "Size", "max")
@@ -1275,6 +1452,17 @@ def _java_parameter_metadata(value: str, schema: dict[str, Any]) -> tuple[str, A
     if pattern:
         schema["pattern"] = pattern
     return description, default, example
+
+
+def _java_field_required(value: str) -> bool:
+    if JAVA_REQUIRED_ANNOTATION_RE.search(value):
+        return True
+    if _annotation_bool(value, "ApiModelProperty", "required", False):
+        return True
+    if _annotation_bool(value, "Schema", "required", False):
+        return True
+    schema_arguments = _annotation_arguments(value, "Schema") or ""
+    return bool(re.search(r"\brequiredMode\s*=\s*(?:RequiredMode\.)?REQUIRED\b", schema_arguments))
 
 
 def _java_direct_statements(value: str) -> list[str]:
@@ -1333,6 +1521,8 @@ def _java_field_schema(
             line_comment = re.search(r"//\s*(?P<body>[^\r\n]+)", value)
             if line_comment:
                 description = " ".join(line_comment.group("body").split())
+    if not description:
+        description = _schema_field_description(name, language)
     assignment = re.search(r"=\s*(?P<value>[^;]+)$", value.strip(), re.DOTALL)
     if default is None and assignment:
         default = _java_literal_value(assignment.group("value"))
@@ -1346,7 +1536,7 @@ def _java_field_schema(
         name,
         "body",
         schema,
-        required=bool(JAVA_REQUIRED_ANNOTATION_RE.search(value)),
+        required=_java_field_required(value),
         description=description,
         language=language,
         **kwargs,
@@ -1634,8 +1824,8 @@ def _set_spring_response_schema(
         _add_item_warning(item, warning)
     if not schema:
         return
-    schema = _enrich_schema_fields(schema, language)
     _warn_schema_gaps(item, schema, "Response")
+    schema = _enrich_schema_fields(schema, language)
     unpack = _response_unpack_for_schema(schema)
     if unpack:
         item["response_unpack"] = {
@@ -1726,9 +1916,11 @@ def _spring_websocket_name_and_description(
     if class_summary and method_summary:
         return _spring_name_and_description(class_summary, method_summary, language=language)
     if method_summary:
-        return method_summary, method_summary
+        return _spring_name_and_description("", method_summary, language=language)
 
-    context = class_summary or _java_identifier_label(class_identifier, language)
+    context = _java_doc_summary(class_summary) or _java_identifier_label(
+        class_identifier, language
+    )
     if not context:
         return None, None
     chinese = str(language or "").lower().startswith("zh")
@@ -1736,10 +1928,10 @@ def _spring_websocket_name_and_description(
     already_endpoint = "websocket" in lower_context or (chinese and "接口" in context)
     if chinese:
         name = context if already_endpoint else f"{context} WebSocket接口"
-        description = f"{context}的 WebSocket 通信接口；消息契约需人工审核。"
+        description = class_summary or f"{context}的 WebSocket 通信接口；消息契约需人工审核。"
     else:
         name = context if already_endpoint else f"{context} WebSocket endpoint"
-        description = f"{context} WebSocket endpoint; message contract requires review."
+        description = class_summary or f"{context} WebSocket endpoint; message contract requires review."
     return name, description
 
 
@@ -1754,7 +1946,9 @@ def _add_spring_parameters(
     raw_parameters: list[str],
     java_schemas: dict[str, dict[str, Any]],
     language: str | None = "en",
+    method_parameter_descriptions: dict[str, str] | None = None,
 ) -> None:
+    method_parameter_descriptions = method_parameter_descriptions or {}
     collected: list[dict[str, Any]] = []
     for raw in raw_parameters:
         declaration = _java_declaration(raw)
@@ -1764,6 +1958,11 @@ def _add_spring_parameters(
         body_args = _annotation_arguments(raw, "RequestBody")
         if body_args is not None:
             body_schema = _resolve_java_body_schema(type_name, java_schemas)
+            body_description = method_parameter_descriptions.get(fallback_name, "")
+            if body_description:
+                body_schema.setdefault("description", body_description)
+            _warn_schema_gaps(item, body_schema, "Request")
+            body_schema = _enrich_schema_fields(body_schema, language)
             if not item.get("request_schema"):
                 item["request_schema"] = deepcopy(body_schema)
             body_parameters = parameters_from_object_schema(body_schema, language=language)
@@ -1793,6 +1992,22 @@ def _add_spring_parameters(
             name = _annotation_string(raw, annotation, "value", "name") or fallback_name
             schema = _java_schema_for_type(type_name)
             description, schema_default, example = _java_parameter_metadata(raw, schema)
+            if not description:
+                description = method_parameter_descriptions.get(fallback_name, "") or method_parameter_descriptions.get(name, "")
+            if not description:
+                identifier_label = _java_identifier_label(name, language)
+                if identifier_label and identifier_label.lower() != name.lower():
+                    description = identifier_label
+                else:
+                    description = (
+                        f"`{name}` 的业务含义未在源码中说明，请复核。"
+                        if str(language or "").lower().startswith("zh")
+                        else f"The business meaning of `{name}` is not documented in source; review required."
+                    )
+                _add_item_warning(
+                    item,
+                    f"Spring parameter {location}:{name} has no annotation or JavaDoc description",
+                )
             default = _annotation_string(raw, annotation, "defaultValue", allow_unnamed=False)
             if default is None:
                 default = schema_default
@@ -1830,6 +2045,7 @@ def parse_spring_routes(
     context_prefix: str | None = None,
     context_refs: list[dict[str, Any]] | None = None,
     language: str | None = "en",
+    service_key: str | None = None,
 ) -> None:
     if path.suffix.lower() not in {".java", ".kt"}:
         return
@@ -1905,6 +2121,9 @@ def parse_spring_routes(
         class_summary = class_context[2] if class_context else ""
         apply_context_prefix = class_context[3] if class_context else True
         method_summary = _java_doc_before(text, match.start())
+        method_parameter_descriptions = _java_doc_param_descriptions(
+            _java_doc_block_before(text, match.start())
+        )
         api_name, api_description = _spring_name_and_description(
             class_summary,
             method_summary,
@@ -1929,6 +2148,7 @@ def parse_spring_routes(
                 description=api_description,
                 discovery_method="source",
                 language=language,
+                service_key=service_key,
             )
             if item:
                 for context_ref in context_refs or []:
@@ -1960,11 +2180,18 @@ def parse_spring_routes(
                 description=api_description,
                 discovery_method="source",
                 language=language,
+                service_key=service_key,
             )
             if item:
                 for context_ref in context_refs or []:
                     add_ref(item, context_ref)
-                _add_spring_parameters(item, signature_parameters, java_schemas or {}, language)
+                _add_spring_parameters(
+                    item,
+                    signature_parameters,
+                    java_schemas or {},
+                    language,
+                    method_parameter_descriptions,
+                )
                 _set_spring_response_schema(
                     item,
                     return_type,
@@ -2013,6 +2240,7 @@ def parse_websocket_routes(
     context_prefix: str | None = None,
     context_refs: list[dict[str, Any]] | None = None,
     language: str | None = "en",
+    service_key: str | None = None,
 ) -> None:
     suffix = path.suffix.lower()
     if suffix not in {".js", ".jsx", ".ts", ".tsx", ".vue", ".java", ".kt"}:
@@ -2025,6 +2253,8 @@ def parse_websocket_routes(
             continue
         for match in pattern.finditer(text):
             route = join_route(prefixes.get(match.groupdict().get("object")), match.group("path"))
+            if pattern is JAVA_WS_RE:
+                route = join_route(context_prefix, route)
             line = text.count("\n", 0, match.start()) + 1
             ensure_interface(
                 interfaces,
@@ -2035,6 +2265,7 @@ def parse_websocket_routes(
                 discovery_method="source",
                 confidence=0.8,
                 language=language,
+                service_key=service_key,
             )
     if suffix not in {".java", ".kt"} or not SPRING_WS_CONFIG_RE.search(text):
         return
@@ -2056,6 +2287,7 @@ def parse_websocket_routes(
                 discovery_method="source",
                 confidence=0.95,
                 language=language,
+                service_key=service_key,
             )
             if item:
                 for context_ref in context_refs or []:
@@ -2233,7 +2465,9 @@ def _apply_schema_example(schema: dict[str, Any], example: Any) -> dict[str, Any
     return result
 
 
-def _schema_detail_gaps(schema: dict[str, Any]) -> tuple[list[str], list[str]]:
+def _schema_detail_gaps(
+    schema: dict[str, Any], prefix: str = ""
+) -> tuple[list[str], list[str]]:
     missing_descriptions: list[str] = []
     missing_examples: list[str] = []
     properties = schema.get("properties")
@@ -2242,11 +2476,35 @@ def _schema_detail_gaps(schema: dict[str, Any]) -> tuple[list[str], list[str]]:
     for name, value in properties.items():
         if not isinstance(value, dict):
             continue
+        field_path = f"{prefix}.{name}" if prefix else str(name)
         if not str(value.get("description") or "").strip():
-            missing_descriptions.append(str(name))
+            missing_descriptions.append(field_path)
         if "example" not in value and "default" not in value:
-            missing_examples.append(str(name))
+            missing_examples.append(field_path)
+        nested_descriptions, nested_examples = _schema_detail_gaps(value, field_path)
+        missing_descriptions.extend(nested_descriptions)
+        missing_examples.extend(nested_examples)
+        items = value.get("items")
+        if isinstance(items, dict):
+            nested_descriptions, nested_examples = _schema_detail_gaps(
+                items, field_path + "[]"
+            )
+            missing_descriptions.extend(nested_descriptions)
+            missing_examples.extend(nested_examples)
     return missing_descriptions, missing_examples
+
+
+def _schema_field_description(
+    name: str, language: str | None
+) -> str:
+    label = _java_identifier_label(name, language)
+    if str(language or "").lower().startswith("zh"):
+        if label and label.lower() != name.lower():
+            return label
+        return f"`{name}` 字段；源码或接口契约未提供业务说明，需复核。"
+    if label and label.lower() != name.lower():
+        return label
+    return f"`{name}` field; its business meaning is not documented in source or API contracts."
 
 
 def _enrich_schema_fields(
@@ -2263,7 +2521,9 @@ def _enrich_schema_fields(
                 str(name), "body", enriched, language=language
             )
             if fallback:
-                enriched.setdefault("description", fallback["description"])
+                enriched.setdefault(
+                    "description", _schema_field_description(str(name), language)
+                )
                 enriched.setdefault("example", deepcopy(fallback["example"]))
             properties[name] = enriched
     if isinstance(result.get("items"), dict):
@@ -2376,6 +2636,298 @@ def _set_request_content_type(item: dict[str, Any], content_type: str | None) ->
 def _explicit_business_key(value: dict[str, Any]) -> str | None:
     candidate = value.get("x-business-key") or value.get("x_business_key")
     return str(candidate).strip() if isinstance(candidate, str) and candidate.strip() else None
+
+
+GROUP_PATH_EXTENSION_KEYS = (
+    "x-qa-platform-group-path",
+    "x-api-group-path",
+    "x-group-path",
+    "group_path",
+    "api_group_path",
+)
+
+
+def _raw_explicit_group_path(value: Any) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    for key in GROUP_PATH_EXTENSION_KEYS:
+        candidate = value.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return None
+
+
+def _normalized_explicit_group_path(value: Any, warnings: list[str], source: str) -> str | None:
+    raw = _raw_explicit_group_path(value)
+    if not raw:
+        return None
+    try:
+        return normalize_group_path(raw)
+    except ValueError as exc:
+        warnings.append(f"{source} API 目录扩展无效，已忽略: {exc}")
+        return None
+
+
+def _openapi_tag_group_paths(
+    document: dict[str, Any], warnings: list[str], source: str
+) -> dict[str, str]:
+    """Read optional directory extensions from OpenAPI tag declarations."""
+    result: dict[str, str] = {}
+    raw_tags = document.get("tags")
+    if not isinstance(raw_tags, list):
+        return result
+    for raw_tag in raw_tags:
+        if not isinstance(raw_tag, dict):
+            continue
+        name = str(raw_tag.get("name") or "").strip()
+        path = _normalized_explicit_group_path(
+            raw_tag, warnings, f"{source} tag {name or '<unnamed>'}"
+        )
+        if name and path:
+            result[name] = path
+    return result
+
+
+def _set_group_path_hint(item: dict[str, Any], path: str | None) -> None:
+    if path:
+        item["_group_path_hint"] = path
+
+
+def _group_rule_matches(interface: dict[str, Any], match: dict[str, Any]) -> bool:
+    """Match the stable, source-derived API facts supported by api_grouping.rules."""
+    if not match:
+        return True
+    protocol = str(interface.get("protocol") or "http").lower()
+    method = str(interface.get("method") or "").upper()
+    path = str(interface.get("path") or interface.get("url") or "")
+    key = str(interface.get("key") or "")
+    service = str(interface.get("service") or "")
+    operation_id = str(interface.get("operation_id") or "")
+    business_key = str(interface.get("_business_key") or "")
+    tags = {str(tag) for tag in interface.get("tags", []) if isinstance(tag, str)}
+
+    if match.get("protocol") and str(match["protocol"]).lower() != protocol:
+        return False
+    methods = match.get("methods", match.get("method"))
+    if isinstance(methods, str):
+        methods = [methods]
+    if isinstance(methods, list) and method not in {str(value).upper() for value in methods}:
+        return False
+    for field, actual in (
+        ("keys", key),
+        ("paths", path),
+        ("operation_ids", operation_id),
+        ("business_keys", business_key),
+    ):
+        expected = match.get(field)
+        if isinstance(expected, str):
+            expected = [expected]
+        if isinstance(expected, list) and actual not in {str(value) for value in expected}:
+            return False
+    if match.get("key") and key != str(match["key"]):
+        return False
+    if match.get("path") and path != str(match["path"]):
+        return False
+    if match.get("operation_id") and operation_id != str(match["operation_id"]):
+        return False
+    if match.get("business_key") and business_key != str(match["business_key"]):
+        return False
+    if match.get("service") and service != str(match["service"]):
+        return False
+    if match.get("path_prefix") and not path.startswith(str(match["path_prefix"])):
+        return False
+    if match.get("path_regex"):
+        if re.search(str(match["path_regex"]), path) is None:
+            return False
+    required_tags = match.get("tags")
+    if isinstance(required_tags, str):
+        required_tags = [required_tags]
+    if isinstance(required_tags, list) and not tags.intersection(
+        str(value) for value in required_tags
+    ):
+        return False
+    return True
+
+
+def _tag_group_path(tags: Any) -> str | None:
+    if not isinstance(tags, list):
+        return None
+    for raw_tag in tags:
+        if not isinstance(raw_tag, str) or not raw_tag.strip():
+            continue
+        # Hierarchical tags are accepted as ``用户服务/用户管理``,
+        # ``用户服务 > 用户管理`` or ``用户服务::用户管理``.
+        segments = [
+            segment.strip()
+            for segment in re.split(r"\s*(?:/|>|::|／)\s*", raw_tag)
+            if segment.strip()
+        ]
+        if segments:
+            return group_path_from_segments(segments)
+    return None
+
+
+def _path_group_segments(path: str) -> list[str]:
+    parsed = urlsplit(path)
+    path_value = parsed.path if parsed.scheme or parsed.netloc else path.split("?", 1)[0]
+    ignored = {"api", "apis", "v1", "v2", "v3", "v4", "version"}
+    result: list[str] = []
+    for raw_segment in path_value.split("/"):
+        segment = raw_segment.strip().strip("{}")
+        segment = segment.removeprefix(":")
+        if not segment or segment.lower() in ignored:
+            continue
+        if raw_segment.strip().startswith(("{", ":")):
+            continue
+        result.append(segment)
+    return result[:2]
+
+
+def _controller_group_segment(item: dict[str, Any]) -> str | None:
+    for ref in item.get("source_refs", []):
+        if not isinstance(ref, dict):
+            continue
+        file_name = Path(str(ref.get("file") or "")).stem
+        if not file_name:
+            continue
+        suffix_match = re.search(
+            r"(?i)(controller|resource|endpoint|handler|router|api)$", file_name
+        )
+        if not suffix_match and Path(str(ref.get("file") or "")).suffix.lower() not in {
+            ".java",
+            ".kt",
+        }:
+            continue
+        candidate = re.sub(
+            r"(?i)(controller|resource|endpoint|handler|router|api)$", "", file_name
+        ).strip("_- ")
+        if candidate and candidate.lower() not in {
+            "application",
+            "bootstrap",
+            "app",
+            "main",
+            "routes",
+            "server",
+        }:
+            return candidate
+    return None
+
+
+def _service_group_segment(value: Any) -> str | None:
+    candidate = str(value or "").strip()
+    if not candidate:
+        return None
+    candidate = re.sub(r"^(?i:app|service)[-_]", "", candidate)
+    return candidate.strip("/_-") or None
+
+
+def _business_group_segments(item: dict[str, Any]) -> list[str]:
+    raw = str(item.get("_business_key") or "")
+    generic = {
+        "get", "post", "put", "patch", "head", "options", "trace",
+        "list", "create", "update", "delete", "detail", "search", "query",
+        "find", "fetch", "save", "add", "remove",
+        "api", "apis", "v1", "v2", "v3", "version", "id", "ids",
+    }
+    segments = [segment for segment in re.split(r"[.:/_-]+", raw) if segment]
+    return [segment for segment in segments if segment.lower() not in generic][:2]
+
+
+def _heuristic_group_path(item: dict[str, Any], root: Path) -> tuple[str, str]:
+    controller = _controller_group_segment(item)
+    if controller:
+        return group_path_from_segments([controller]), "controller"
+
+    service = _service_group_segment(item.get("service"))
+    if service and service.lower() != root.name.lower():
+        return group_path_from_segments([service]), "module"
+
+    business_segments = _business_group_segments(item)
+    if business_segments:
+        return group_path_from_segments(business_segments), "business_key"
+
+    path_segments = _path_group_segments(str(item.get("path") or item.get("url") or ""))
+    if path_segments:
+        return group_path_from_segments(path_segments), "path"
+    return "/", "root"
+
+
+def _join_group_paths(parent: str | None, child: str | None) -> str:
+    normalized_parent = normalize_group_path(parent or "/")
+    normalized_child = normalize_group_path(child or "/")
+    if normalized_parent == "/":
+        return normalized_child
+    if normalized_child == "/":
+        return normalized_parent
+    if normalized_child == normalized_parent or normalized_child.startswith(
+        normalized_parent + "/"
+    ):
+        return normalized_child
+    return normalize_group_path(
+        normalized_parent.rstrip("/") + "/" + normalized_child.lstrip("/")
+    )
+
+
+def assign_api_group_paths(
+    interfaces: dict[str, dict[str, dict[str, Any]]],
+    root: Path,
+    grouping: dict[str, Any],
+    service_topology: dict[str, Any] | None = None,
+) -> None:
+    """Assign API directories as service root plus business/controller group."""
+    rules = grouping.get("rules", []) if isinstance(grouping, dict) else []
+    default_path = str(grouping.get("default_path") or "/") if isinstance(grouping, dict) else "/"
+    services = {
+        str(service.get("key")): service
+        for service in (service_topology or {}).get("services", [])
+        if isinstance(service, dict) and service.get("key")
+    }
+    for protocol in ("http", "ws"):
+        for item in interfaces[protocol].values():
+            matches = [
+                rule
+                for rule in rules
+                if isinstance(rule, dict)
+                and isinstance(rule.get("match"), dict)
+                and _group_rule_matches(item, rule["match"])
+            ]
+            if matches:
+                group_path = str(matches[0].get("group_path") or default_path)
+                source = "project_config"
+                if len(matches) > 1:
+                    item.setdefault("warnings", []).append(
+                        "Multiple API directory rules matched; the first configured rule was selected"
+                    )
+            elif default_path != "/":
+                group_path = default_path
+                source = "project_config_default"
+            else:
+                if item.get("_group_path_hint"):
+                    business_path = str(item["_group_path_hint"])
+                    business_source = "openapi_extension"
+                else:
+                    tag_path = _tag_group_path(item.get("tags"))
+                    if tag_path:
+                        business_path = tag_path
+                        business_source = "tag"
+                    else:
+                        business_path, business_source = _heuristic_group_path(item, root)
+                service = services.get(str(item.get("service") or ""))
+                service_group_path = str((service or {}).get("group_path") or "/")
+                group_path = _join_group_paths(service_group_path, business_path)
+                source = (
+                    f"service_topology+{business_source}"
+                    if service_group_path != "/"
+                    else business_source
+                )
+
+            item["group_path"] = normalize_group_path(group_path)
+            fallback_source = source.removeprefix("service_topology+")
+            if fallback_source in {"business_key", "path", "root"}:
+                item.setdefault("warnings", []).append(
+                    f"API 目录由{ {'business_key': '业务标识', 'path': 'URL 路径', 'root': '根目录'}.get(fallback_source, fallback_source) }推导，请复核 group_path"
+                )
+            item.pop("_group_path_hint", None)
 
 
 def _add_openapi_parameters(
@@ -2568,6 +3120,11 @@ def load_openapi(
         reject_or_warn(f"API document must be an object: {path}")
         return
     ref = {"file": source_name, "line": 1} if source_name else source_ref(path, root, 1)
+    document_source = source_name or path.name
+    tag_group_paths = _openapi_tag_group_paths(document, warnings, document_source)
+    document_group_path = _normalized_explicit_group_path(
+        document, warnings, f"{document_source} document"
+    )
     if not isinstance(document.get("paths"), dict):
         channels = document.get("channels")
         if not isinstance(channels, dict):
@@ -2607,6 +3164,13 @@ def load_openapi(
             )
             if item is None:
                 continue
+            _set_group_path_hint(
+                item,
+                _normalized_explicit_group_path(
+                    channel_item, warnings, f"{document_source} channel {channel}"
+                )
+                or document_group_path,
+            )
             channel_parameters = channel_item.get("parameters")
             if isinstance(channel_parameters, dict):
                 collected: list[dict[str, Any]] = []
@@ -2690,6 +3254,20 @@ def load_openapi(
             item["tags"] = sorted(
                 set(item.get("tags", [])) | {str(tag) for tag in tags if isinstance(tag, str)}
             )
+            group_path_hint = (
+                _normalized_explicit_group_path(
+                    operation, warnings, f"{document_source} {method.upper()} {route}"
+                )
+                or _normalized_explicit_group_path(
+                    path_item, warnings, f"{document_source} path {route}"
+                )
+                or next(
+                    (tag_group_paths[tag] for tag in tags if tag in tag_group_paths),
+                    None,
+                )
+                or document_group_path
+            )
+            _set_group_path_hint(item, group_path_hint)
             consumes = operation.get("consumes", document.get("consumes"))
             request_content_type = _preferred_json_type(consumes)
             _add_openapi_parameters(
@@ -3121,41 +3699,57 @@ ZH_TOKEN_LABELS = {
     "api": "服务",
     "auth": "认证",
     "chat": "聊天",
+    "chunk": "分块",
     "client": "客户端",
+    "code": "编码",
     "config": "配置",
     "conversation": "会话",
+    "content": "内容",
     "create": "创建",
     "add": "新增",
     "delete": "删除",
     "detail": "详情",
+    "description": "说明",
     "download": "下载",
     "edit": "编辑",
+    "enabled": "是否启用",
+    "embedding": "嵌入",
     "entities": "实体",
     "entity": "实体",
     "export": "导出",
+    "ext": "扩展",
     "execution": "执行",
     "explain": "解释",
     "field": "字段",
     "fields": "字段",
+    "file": "文件",
     "lineage": "血缘",
     "metadata": "元数据",
     "meta": "元数据",
     "health": "健康检查",
     "http": "HTTP",
+    "id": "标识",
     "import": "导入",
     "list": "列表",
     "login": "登录",
     "logout": "登出",
     "message": "消息",
+    "method": "方式",
+    "model": "模型",
     "manage": "管理",
     "management": "管理",
+    "name": "名称",
     "order": "订单",
+    "path": "路径",
     "permission": "权限",
+    "provider": "提供方",
     "plan": "计划",
     "pivot": "透视",
     "preview": "预览",
     "project": "项目",
     "query": "查询",
+    "request": "请求",
+    "response": "响应",
     "refresh": "刷新",
     "register": "注册",
     "remove": "删除",
@@ -3165,15 +3759,22 @@ ZH_TOKEN_LABELS = {
     "search": "搜索",
     "send": "发送",
     "setting": "设置",
+    "sync": "同步",
     "system": "系统",
+    "status": "状态",
     "test": "测试",
+    "tool": "工具",
+    "type": "类型",
     "transform": "转换",
     "update": "更新",
     "upload": "上传",
     "user": "用户",
+    "url": "地址",
     "validate": "校验",
+    "version": "版本",
     "value": "值",
     "key": "键",
+    "kb": "知识库",
     "virtual": "虚拟",
     "data": "数据",
     "flow": "流程",
@@ -3234,21 +3835,29 @@ def ensure_unique_interface_names(
     ]
     grouped: dict[str, list[dict[str, Any]]] = {}
     for item in all_interfaces:
-        name = str(item.get("name") or "").strip()
+        name = _bounded_display_name(item.get("name"))
         if name:
+            item["name"] = name
             grouped.setdefault(name, []).append(item)
+    used_names = {
+        name for name, items in grouped.items() if len(items) == 1
+    }
     for name, items in grouped.items():
         if len(items) < 2:
             continue
-        used_names: set[str] = set()
         for item in sorted(items, key=lambda value: str(value.get("key") or "")):
             protocol = str(item.get("protocol") or "http").upper()
             method = str(item.get("method") or protocol).upper()
             endpoint = str(item.get("path") or item.get("url") or item.get("key") or "")
-            candidate = f"{name}（{method} {endpoint}）"
+            endpoint_label = _bounded_display_name(endpoint, 56)
+            candidate = _display_name_with_suffix(
+                name, f"（{method} {endpoint_label}）"
+            )
             counter = 2
             while candidate in used_names:
-                candidate = f"{name}（{method} {endpoint} #{counter}）"
+                candidate = _display_name_with_suffix(
+                    name, f"（{method} {endpoint_label} #{counter}）"
+                )
                 counter += 1
             item["name"] = candidate
             used_names.add(candidate)
@@ -3991,6 +4600,13 @@ def decide_import(
             "deleted": [],
             "unchanged": 0,
         }
+    if previous.get("service_topology") != current.get("service_topology"):
+        summary["service_topology"] = {
+            "created": [],
+            "updated": ["service_topology"],
+            "deleted": [],
+            "unchanged": 0,
+        }
     changed_sections = [
         section
         for section, changes in summary.items()
@@ -4056,6 +4672,12 @@ def scan(args: argparse.Namespace) -> dict[str, Any]:
     configured_success_assertions = normalize_success_assertions(
         config.get("success_assertions")
     )
+    configured_api_grouping = normalize_api_grouping(
+        config.get("api_grouping", config.get("api_groups"))
+    )
+    configured_service_topology = normalize_service_topology(
+        config.get("service_topology", config.get("services"))
+    )
     api_templates = normalize_api_templates(config.get("api_templates"))
     template_discovery = normalize_api_template_discovery(
         config.get("api_template_discovery")
@@ -4086,6 +4708,12 @@ def scan(args: argparse.Namespace) -> dict[str, Any]:
     interfaces: dict[str, dict[str, dict[str, Any]]] = {"http": {}, "ws": {}}
     features: dict[str, dict[str, Any]] = {}
     warnings: list[str] = []
+    for service in configured_service_topology["services"]:
+        for source_root in service.get("source_roots", []):
+            if not (root / source_root).exists():
+                warnings.append(
+                    f"service_topology service {service['key']} source_root does not exist: {source_root}"
+                )
     files = discover_files(root, excluded_roots)
     language = resolve_language(root, config, files, args.language)
     router_prefixes = discover_router_prefixes(files)
@@ -4097,11 +4725,24 @@ def scan(args: argparse.Namespace) -> dict[str, Any]:
         parse_python_routes(text, path, root, interfaces, router_prefixes, language["code"])
         context_prefix = None
         context_refs: list[dict[str, Any]] = []
+        configured_service, service_warnings = resolve_configured_service(
+            path, root, configured_service_topology
+        )
+        warnings.extend(service_warnings)
+        configured_service_key = (
+            str(configured_service.get("key")) if configured_service else None
+        )
         if path.suffix.lower() in {".java", ".kt"}:
             context_prefix, context_refs, context_warnings = resolve_spring_context_path(
                 path, spring_context_candidates
             )
             warnings.extend(context_warnings)
+            context_prefix, context_refs, configured_context_warnings = (
+                configured_service_context_path(
+                    configured_service, context_prefix, context_refs
+                )
+            )
+            warnings.extend(configured_context_warnings)
         parse_spring_routes(
             text,
             path,
@@ -4111,6 +4752,7 @@ def scan(args: argparse.Namespace) -> dict[str, Any]:
             context_prefix=context_prefix if path.suffix.lower() in {".java", ".kt"} else None,
             context_refs=context_refs if path.suffix.lower() in {".java", ".kt"} else None,
             language=language["code"],
+            service_key=configured_service_key,
         )
         parse_call_routes(text, path, root, interfaces, language["code"])
         parse_websocket_routes(
@@ -4121,6 +4763,7 @@ def scan(args: argparse.Namespace) -> dict[str, Any]:
             context_prefix=context_prefix if path.suffix.lower() in {".java", ".kt"} else None,
             context_refs=context_refs if path.suffix.lower() in {".java", ".kt"} else None,
             language=language["code"],
+            service_key=configured_service_key,
         )
         parse_frontend_routes(text, path, root, features)
 
@@ -4229,6 +4872,9 @@ def scan(args: argparse.Namespace) -> dict[str, Any]:
 
     finalize_http_request_schemas(interfaces)
     apply_api_template_bindings(interfaces, api_templates)
+    assign_api_group_paths(
+        interfaces, root, configured_api_grouping, configured_service_topology
+    )
     success_code_candidates, success_code_warnings = discover_success_code_values(root, files)
     warnings.extend(success_code_warnings)
     success_assertions = build_success_assertion_assets(
@@ -4297,6 +4943,8 @@ def scan(args: argparse.Namespace) -> dict[str, Any]:
             "ws": sorted(interfaces["ws"].values(), key=lambda item: item["key"]),
         },
         "api_templates": api_templates,
+        "api_grouping": configured_api_grouping,
+        "service_topology": configured_service_topology,
         "api_template_discovery": template_discovery,
         "assertion_definitions": success_assertions["assertion_definitions"],
         "success_assertions": {

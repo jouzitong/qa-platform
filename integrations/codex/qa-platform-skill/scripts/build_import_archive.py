@@ -12,6 +12,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+from api_grouping import normalize_group_path
 from module_bundle import ModuleBundleError, load_import_source, public_flow_documents
 from project_config import (
     normalize_package_version,
@@ -163,6 +164,7 @@ def convert_interface(interface: dict[str, Any]) -> dict[str, Any]:
         "key": key,
         "name": str(interface.get("name") or key),
         "protocol": protocol,
+        "group_path": normalize_group_path(interface.get("group_path", "/")),
         "description": str(interface.get("description") or ""),
         "request": request,
         "request_schema": (
@@ -313,6 +315,8 @@ def build_archive(manifest: dict[str, Any], output: Path, package_version: str |
         "version": "1.0",
         "package_version": version,
         "language": manifest.get("language", project.get("language")),
+        "api_grouping": deepcopy(manifest.get("api_grouping") or {}),
+        "service_topology": deepcopy(manifest.get("service_topology") or {}),
         "storage": {**storage_metadata, **normalize_storage(storage_metadata)},
         "project": project,
         "source": source,

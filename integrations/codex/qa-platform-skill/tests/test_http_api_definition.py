@@ -21,6 +21,7 @@ class HttpApiDefinitionTests(unittest.TestCase):
         converted = convert_interface(definition)
 
         self.assertEqual(converted["key"], "http:POST:/api/v1/auths/signin")
+        self.assertEqual(converted["group_path"], "/认证")
         self.assertEqual(
             converted["request"],
             {
@@ -64,6 +65,7 @@ class HttpApiDefinitionTests(unittest.TestCase):
         )
 
         self.assertEqual(converted["key"], "health")
+        self.assertEqual(converted["group_path"], "/")
         self.assertEqual(converted["request"], {"method": "GET", "path": "/health", "headers": {}})
 
 

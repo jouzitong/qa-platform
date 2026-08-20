@@ -154,6 +154,33 @@ def test_import_update_preview_and_reject_do_not_apply() -> None:
         assert api["name"] == "健康检查"
 
 
+def test_import_preview_rejects_api_names_longer_than_platform_contract() -> None:
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/imports/preview",
+            content=make_archive(
+                name="overlong-api-name-project",
+                api_name="过长接口名称" * 21,
+            ),
+            headers={"X-Import-Filename": "qa.zip"},
+        )
+
+        assert response.status_code == 201
+        preview = response.json()
+        assert preview["status"] == "pending"
+        assert any(
+            "apis 第 1 项字段 name 长度不能超过 120 个字符" in error
+            for error in preview["errors"]
+        )
+
+        approval = client.post(f"/api/v1/imports/{preview['id']}/approve")
+        assert approval.status_code == 422
+        projects = client.get("/api/v1/projects").json()
+        assert not any(
+            project["name"] == "overlong-api-name-project" for project in projects
+        )
+
+
 def test_one_click_is_pending_and_rar_is_explicitly_rejected() -> None:
     with TestClient(app) as client:
         response = client.post(

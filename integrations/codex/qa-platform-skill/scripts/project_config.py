@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from api_grouping import normalize_group_path
+
 try:
     import tomllib
 except ModuleNotFoundError:  # Python 3.10 compatibility for the standalone Skill.
@@ -416,6 +418,240 @@ def normalize_api_template_discovery(value: Any) -> dict[str, bool]:
     if not isinstance(enabled, bool):
         raise SystemExit("qa-platform api_template_discovery.enabled must be boolean")
     return {"enabled": enabled}
+
+
+def normalize_api_grouping(value: Any) -> dict[str, Any]:
+    """Normalize explicit API-directory rules from project configuration.
+
+    ``api_grouping`` is intentionally metadata-only. The current platform creates
+    directory chains from each imported API's ``group_path``; no separate empty
+    directory module is required for the import contract.
+    """
+    if value is None:
+        return {"default_path": "/", "rules": []}
+    if isinstance(value, list):
+        raw_value: dict[str, Any] = {"rules": value}
+    elif isinstance(value, dict):
+        raw_value = value
+    else:
+        raise SystemExit("qa-platform api_grouping must be an object or list")
+
+    try:
+        default_path = normalize_group_path(
+            raw_value.get("default_path", raw_value.get("default", "/"))
+        )
+    except ValueError as exc:
+        raise SystemExit(f"qa-platform api_grouping.default_path is invalid: {exc}") from None
+
+    raw_rules = raw_value.get("rules", raw_value.get("mappings", []))
+    if not isinstance(raw_rules, list):
+        raise SystemExit("qa-platform api_grouping.rules must be a list")
+
+    rules: list[dict[str, Any]] = []
+    for index, raw_rule in enumerate(raw_rules):
+        if not isinstance(raw_rule, dict):
+            raise SystemExit(f"qa-platform api_grouping.rules[{index}] must be an object")
+        raw_group_path = raw_rule.get("group_path", raw_rule.get("path"))
+        if not isinstance(raw_group_path, str) or not raw_group_path.strip():
+            raise SystemExit(
+                f"qa-platform api_grouping.rules[{index}].group_path must be a non-empty string"
+            )
+        try:
+            group_path = normalize_group_path(raw_group_path)
+        except ValueError as exc:
+            raise SystemExit(
+                f"qa-platform api_grouping.rules[{index}].group_path is invalid: {exc}"
+            ) from None
+        match = raw_rule.get("match", raw_rule.get("when", {}))
+        if not isinstance(match, dict):
+            raise SystemExit(
+                f"qa-platform api_grouping.rules[{index}].match must be an object"
+            )
+        if isinstance(match.get("path_regex"), str):
+            try:
+                re.compile(match["path_regex"])
+            except re.error as exc:
+                raise SystemExit(
+                    f"qa-platform api_grouping.rules[{index}].match.path_regex is invalid: {exc}"
+                ) from None
+        rules.append({"group_path": group_path, "match": deepcopy(match)})
+
+    return {"default_path": default_path, "rules": rules}
+
+
+def _normalize_source_root(value: Any, field: str) -> str:
+    raw = str(value or "").strip().replace("\\", "/")
+    if not raw:
+        raise SystemExit(f"{field} must be a non-empty project-relative path")
+    path = Path(raw)
+    if path.is_absolute() or ".." in path.parts:
+        raise SystemExit(f"{field} must stay inside the project root")
+    normalized = path.as_posix().strip("/")
+    return normalized or "."
+
+
+def _normalize_route_prefix(value: Any, field: str) -> str | None:
+    if value is None or not str(value).strip():
+        return None
+    raw = str(value).strip()
+    if "://" in raw or any(token in raw for token in ("?", "#", "*", "{")):
+        raise SystemExit(f"{field} must be a literal route prefix such as /chat")
+    try:
+        return normalize_group_path(raw)
+    except ValueError as exc:
+        raise SystemExit(f"{field} is invalid: {exc}") from None
+
+
+def _join_route_prefixes(*values: str | None) -> str | None:
+    segments = [value.strip("/") for value in values if value and value != "/"]
+    if segments:
+        return "/" + "/".join(segment for segment in segments if segment)
+    return "/" if any(value == "/" for value in values) else None
+
+
+def normalize_service_topology(value: Any) -> dict[str, Any]:
+    """Normalize project-owned service, route-prefix, gateway, and directory facts."""
+    if value is None:
+        return {"gateway": {}, "services": []}
+    if isinstance(value, list):
+        value = {"services": value}
+    if not isinstance(value, dict):
+        raise SystemExit("qa-platform service_topology must be an object or service list")
+
+    raw_gateway = value.get("gateway", {})
+    if not isinstance(raw_gateway, dict):
+        raise SystemExit("qa-platform service_topology.gateway must be an object")
+    gateway: dict[str, Any] = {}
+    for field in ("service_key", "name", "base_url_variable"):
+        if field not in raw_gateway:
+            continue
+        normalized = str(raw_gateway.get(field) or "").strip()
+        if not normalized:
+            raise SystemExit(f"qa-platform service_topology.gateway.{field} must be non-empty")
+        gateway[field] = normalized
+    if "source_root" in raw_gateway:
+        gateway["source_root"] = _normalize_source_root(
+            raw_gateway["source_root"], "qa-platform service_topology.gateway.source_root"
+        )
+
+    raw_services = value.get("services", [])
+    if not isinstance(raw_services, list):
+        raise SystemExit("qa-platform service_topology.services must be a list")
+    services: list[dict[str, Any]] = []
+    keys: set[str] = set()
+    for index, raw_service in enumerate(raw_services):
+        field_prefix = f"qa-platform service_topology.services[{index}]"
+        if not isinstance(raw_service, dict):
+            raise SystemExit(f"{field_prefix} must be an object")
+        key = str(raw_service.get("key") or "").strip()
+        if not key:
+            raise SystemExit(f"{field_prefix}.key is required")
+        if key in keys:
+            raise SystemExit(f"qa-platform service_topology has duplicate service key: {key}")
+
+        raw_roots = raw_service.get(
+            "source_roots",
+            [raw_service["source_root"]] if raw_service.get("source_root") else [],
+        )
+        if isinstance(raw_roots, str):
+            raw_roots = [raw_roots]
+        if not isinstance(raw_roots, list) or not raw_roots:
+            raise SystemExit(f"{field_prefix}.source_roots must contain at least one path")
+        source_roots: list[str] = []
+        for root_index, raw_root in enumerate(raw_roots):
+            source_root = _normalize_source_root(
+                raw_root, f"{field_prefix}.source_roots[{root_index}]"
+            )
+            if source_root not in source_roots:
+                source_roots.append(source_root)
+
+        raw_server = raw_service.get("server", {})
+        if not isinstance(raw_server, dict):
+            raise SystemExit(f"{field_prefix}.server must be an object")
+        context_path = _normalize_route_prefix(
+            raw_server.get("context_path", raw_server.get("context-path")),
+            f"{field_prefix}.server.context_path",
+        )
+        servlet_path = _normalize_route_prefix(
+            raw_server.get("servlet_path", raw_server.get("servlet-path")),
+            f"{field_prefix}.server.servlet_path",
+        )
+        server: dict[str, Any] = {}
+        if context_path:
+            server["context_path"] = context_path
+        if servlet_path:
+            server["servlet_path"] = servlet_path
+        if "port" in raw_server:
+            try:
+                port = int(raw_server["port"])
+            except (TypeError, ValueError):
+                raise SystemExit(f"{field_prefix}.server.port must be an integer") from None
+            if not 1 <= port <= 65535:
+                raise SystemExit(f"{field_prefix}.server.port must be between 1 and 65535")
+            server["port"] = port
+
+        raw_service_gateway = raw_service.get("gateway", {})
+        if not isinstance(raw_service_gateway, dict):
+            raise SystemExit(f"{field_prefix}.gateway must be an object")
+        service_gateway: dict[str, Any] = {}
+        for field in ("service_id", "route_id"):
+            if field in raw_service_gateway:
+                normalized = str(raw_service_gateway.get(field) or "").strip()
+                if not normalized:
+                    raise SystemExit(f"{field_prefix}.gateway.{field} must be non-empty")
+                service_gateway[field] = normalized
+        gateway_path_prefix = _normalize_route_prefix(
+            raw_service_gateway.get("path_prefix"),
+            f"{field_prefix}.gateway.path_prefix",
+        )
+        if gateway_path_prefix:
+            service_gateway["path_prefix"] = gateway_path_prefix
+        if "strip_prefix" in raw_service_gateway:
+            try:
+                strip_prefix = int(raw_service_gateway["strip_prefix"])
+            except (TypeError, ValueError):
+                raise SystemExit(f"{field_prefix}.gateway.strip_prefix must be an integer") from None
+            if strip_prefix < 0:
+                raise SystemExit(f"{field_prefix}.gateway.strip_prefix must be non-negative")
+            service_gateway["strip_prefix"] = strip_prefix
+
+        explicit_route_prefix = _normalize_route_prefix(
+            raw_service.get("route_prefix"), f"{field_prefix}.route_prefix"
+        )
+        route_prefix = explicit_route_prefix or gateway_path_prefix or _join_route_prefixes(
+            context_path, servlet_path
+        )
+        group_path = None
+        if raw_service.get("group_path") is not None:
+            try:
+                group_path = normalize_group_path(raw_service["group_path"])
+            except ValueError as exc:
+                raise SystemExit(f"{field_prefix}.group_path is invalid: {exc}") from None
+
+        service: dict[str, Any] = {
+            "key": key,
+            "name": str(raw_service.get("name") or key).strip(),
+            "source_roots": source_roots,
+        }
+        application_name = str(raw_service.get("application_name") or "").strip()
+        if application_name:
+            service["application_name"] = application_name
+        if route_prefix:
+            service["route_prefix"] = route_prefix
+        if group_path:
+            service["group_path"] = group_path
+        if server:
+            service["server"] = server
+        if service_gateway:
+            service["gateway"] = service_gateway
+        keys.add(key)
+        services.append(service)
+
+    if gateway.get("service_key") and gateway["service_key"] not in keys:
+        raise SystemExit(
+            "qa-platform service_topology.gateway.service_key must reference a configured service"
+        )
+    return {"gateway": gateway, "services": services}
 
 
 def normalize_flow_documents(value: Any) -> list[dict[str, Any]]:

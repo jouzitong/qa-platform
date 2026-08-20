@@ -208,6 +208,70 @@ class ScanParameterTests(unittest.TestCase):
             "聊天会话推送通道 - 注册会话推送连接",
         )
 
+    def test_spring_api_name_uses_first_sentences_and_respects_platform_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / ".qa-platform.json").write_text(
+                json.dumps({"variables": {"base_url": "127.0.0.1:9764"}}),
+                encoding="utf-8",
+            )
+            (root / "KnowledgeController.java").write_text(
+                """
+                import org.springframework.web.bind.annotation.*;
+
+                /**
+                 * AI 知识库接口。
+                 * 统一维护知识库文档、版本和模型提供方同步关系。
+                 */
+                @RestController
+                @RequestMapping("/knowledge")
+                public class KnowledgeController {
+                    /**
+                     * 删除知识库数据集。
+                     * 删除模型提供方侧的一个或多个数据集，并保留审计记录。
+                     */
+                    @DeleteMapping("/datasets")
+                    public void deleteDatasets() {}
+                }
+                """,
+                encoding="utf-8",
+            )
+            manifest_path = root / "manifest.json"
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(SCAN),
+                    str(root),
+                    "--language",
+                    "zh-CN",
+                    "--output",
+                    str(manifest_path),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+            api = manifest["interfaces"]["http"][0]
+            self.assertEqual(api["name"], "AI 知识库接口 - 删除知识库数据集")
+            self.assertLessEqual(len(api["name"]), 120)
+            self.assertIn("统一维护知识库文档", api["description"])
+            self.assertIn("保留审计记录", api["description"])
+
+            api["name"] = "超长名称" * 31
+            manifest_path.write_text(
+                json.dumps(manifest, ensure_ascii=False), encoding="utf-8"
+            )
+            invalid = subprocess.run(
+                [sys.executable, str(VALIDATE), str(manifest_path), "--json"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(invalid.returncode, 0)
+            self.assertIn("name must not exceed 120 characters", invalid.stdout)
+
     def test_spring_application_prefix_is_added_to_http_and_websocket_routes(self) -> None:
         variants = (
             ("application.properties", "server.servlet.context-path=/chat\n", "/chat"),
@@ -904,6 +968,86 @@ spring:
         )
         for schema in (api["request_schema"]["schema"], response):
             self.assertTrue(schema)
+
+    def test_spring_uses_method_javadoc_and_field_annotations_for_business_descriptions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / ".qa-platform.json").write_text(
+                json.dumps({"variables": {"base_url": "127.0.0.1:9764"}}),
+                encoding="utf-8",
+            )
+            (root / "ToolController.java").write_text(
+                """
+                import org.springframework.web.bind.annotation.*;
+
+                @RestController
+                @RequestMapping("/tools")
+                public class ToolController {
+                    /**
+                     * 更新工具配置。
+                     * @param toolCode 工具业务编码
+                     * @param request 工具配置请求
+                     */
+                    @PostMapping("/{toolCode}")
+                    public R<ToolResponse> update(
+                        @PathVariable String toolCode,
+                        @RequestBody ToolRequest request
+                    ) { return null; }
+
+                    public static class ToolRequest {
+                        @ApiModelProperty(value = "工具名称", example = "搜索工具", required = true)
+                        private String name;
+
+                        @Schema(description = "工具运行配置")
+                        private ToolConfig config;
+                    }
+
+                    public static class ToolConfig {
+                        @JsonPropertyDescription("模型标识")
+                        private String modelId;
+
+                        @NotNull(message = "启用状态不能为空")
+                        private Boolean enabled;
+                    }
+
+                    public static class ToolResponse {
+                        /** 工具唯一标识。 */
+                        private String id;
+                        @ApiModelProperty(value = "工具运行配置")
+                        private ToolConfig config;
+                    }
+                }
+                """,
+                encoding="utf-8",
+            )
+            manifest_path = root / "manifest.json"
+            subprocess.run(
+                [sys.executable, str(SCAN), str(root), "--language", "zh-CN", "--output", str(manifest_path)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                [sys.executable, str(VALIDATE), str(manifest_path)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        api = next(item for item in manifest["interfaces"]["http"] if item["path"] == "/tools/{toolCode}")
+        by_name = {item["name"]: item for item in api["parameters"]}
+        self.assertEqual(by_name["toolCode"]["description"], "工具业务编码")
+        self.assertEqual(by_name["name"]["description"], "工具名称")
+        self.assertEqual(by_name["name"]["example"], "搜索工具")
+        self.assertTrue(by_name["name"]["required"])
+        self.assertEqual(by_name["config"]["description"], "工具运行配置")
+        config_children = {item["name"]: item for item in by_name["config"]["children"]}
+        self.assertEqual(config_children["modelId"]["description"], "模型标识")
+        self.assertEqual(config_children["enabled"]["description"], "启用状态不能为空")
+        response_properties = api["response_schema"]["properties"]
+        self.assertEqual(response_properties["id"]["description"], "工具唯一标识")
+        self.assertEqual(response_properties["config"]["properties"]["modelId"]["description"], "模型标识")
 
     def test_static_api_template_discovery_reads_frontend_headers_and_gateway_exclusions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

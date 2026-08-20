@@ -5,6 +5,7 @@
   "method": "POST",
   "path": "/api/v1/auths/signin",
   "name": "用户登录",
+  "group_path": "/认证",
   "template_key": "athena-auth",
   "description": "OpenWebUI 兼容认证登录接口。",
   "request": {

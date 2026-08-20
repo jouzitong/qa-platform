@@ -115,6 +115,8 @@ def main() -> int:
         "storage": storage,
         "api_templates": [],
         "api_template_discovery": {"enabled": True},
+        "api_grouping": {"default_path": "/", "rules": []},
+        "service_topology": {"gateway": {}, "services": []},
         "success_assertions": default_success_assertions(),
         "flow_documents": [
             {"path": path, "required": True} for path in args.flow_document
@@ -152,6 +154,8 @@ def main() -> int:
                 "success_assertions": config["success_assertions"],
                 "api_templates": config["api_templates"],
                 "api_template_discovery": config["api_template_discovery"],
+                "api_grouping": config["api_grouping"],
+                "service_topology": config["service_topology"],
                 "flow_documents": config["flow_documents"],
                 "openapi": config["openapi"],
             },

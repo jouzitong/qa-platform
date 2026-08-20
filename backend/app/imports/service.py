@@ -116,6 +116,31 @@ DEFAULTS: dict[str, dict[str, Any]] = {
 }
 
 RESPONSE_PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+IMPORT_REFERENCE_FIELDS = {"template_id", "success_assertion_id"}
+
+
+def _validate_import_string_lengths(
+    collection: str,
+    model: type[Any],
+    fields: Iterable[str],
+    record: dict[str, Any],
+    position: int,
+    errors: list[str],
+) -> None:
+    """Reject values SQLite would store but the public response model cannot return."""
+    for field in fields:
+        if field in IMPORT_REFERENCE_FIELDS or field not in record:
+            continue
+        value = record.get(field)
+        if not isinstance(value, str):
+            continue
+        column = model.__table__.columns.get(field)
+        max_length = getattr(getattr(column, "type", None), "length", None)
+        if max_length and len(value) > max_length:
+            errors.append(
+                f"{collection} 第 {position} 项字段 {field} 长度不能超过 "
+                f"{max_length} 个字符（当前 {len(value)}）"
+            )
 
 
 def _value(record: dict[str, Any], collection: str, field: str) -> Any:
@@ -174,8 +199,12 @@ def _normalize_package(package: dict[str, Any]) -> tuple[dict[str, Any], list[st
         normalized["project"] = {}
     elif project is None:
         normalized["project"] = {}
+    if isinstance(normalized["project"], dict):
+        _validate_import_string_lengths(
+            "project", Project, ("name",), normalized["project"], 1, errors
+        )
 
-    for collection, _model, identity_field, _fields in COLLECTIONS:
+    for collection, model, identity_field, fields in COLLECTIONS:
         records = normalized.get(collection, [])
         if not isinstance(records, list):
             errors.append(f"{collection} 必须是数组")
@@ -198,6 +227,9 @@ def _normalize_package(package: dict[str, Any]) -> tuple[dict[str, Any], list[st
                 record["name"] = identity
             if not record.get("key") and collection in {"apis", "flows", "test_plans"}:
                 record["key"] = identity
+            _validate_import_string_lengths(
+                collection, model, fields, record, position, errors
+            )
 
     return normalized, errors, warnings
 

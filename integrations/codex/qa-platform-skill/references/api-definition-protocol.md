@@ -152,11 +152,11 @@ qa-platform 执行四类请求位置；参数树的根节点使用 `in`，`objec
 | `@RequestHeader` | `header` |
 | `@RequestBody SomeDto` | `SomeDto` 的 JSON 顶层字段映射为 `body` |
 
-`required = false` 或 `Optional<T>` 生成非必填参数；`defaultValue` 生成 `default` 并使该参数非必填。Java `String`、整数包装类型、浮点类型、布尔类型、集合、Map 和数组映射到六个规范类型。`@NotNull`、`@NotBlank`、`@NotEmpty` 标记 DTO 字段必填；`@Size`、`@Min`、`@Max`、`@Pattern`、`@Schema` / `@Parameter` 的可读元数据会尽可能保留。
+`required = false` 或 `Optional<T>` 生成非必填参数；`defaultValue` 生成 `default` 并使该参数非必填。Java `String`、整数包装类型、浮点类型、布尔类型、集合、Map 和数组映射到六个规范类型。`@NotNull`、`@NotBlank`、`@NotEmpty` 标记 DTO 字段必填；`@Size`、`@Min`、`@Max`、`@Pattern`、`@Schema` / `@Parameter` 的可读元数据会尽可能保留。方法参数说明优先取 `@Schema` / `@Parameter`，其次读取方法 JavaDoc 的 `@param 参数名 说明`；例如 `@param toolCode 工具业务编码` 必须生成“工具业务编码”，不能退化成“路径参数 `toolCode`（string）”。
 
 DTO 解析是静态、保守的：支持类、嵌套类和 record 的字段，并对索引到的嵌套 DTO 递归生成 `children`；循环引用在当前可解析边界停止。未知 DTO、Map、根数组或标量 body 不生成虚假的顶层字段，而是添加警告。`MultipartFile` / `Part` 不生成可执行参数，因为当前运行时只发送 JSON。
 
-JavaDoc 必须先从字段声明中剥离再解析 Java 类型；字段 JavaDoc 会作为该字段的 `description`。枚举声明映射为 `type: "string"` 并保留 `enum`，不能因为字段引用被初始识别为 object 就丢失枚举类型。没有 OpenAPI/Swagger 响应契约时，Spring Mapping 方法的返回类型是次级响应来源：解包 `ResponseEntity<T>`、`Optional<T>` 等容器，递归展开 DTO；常见 `R<T>`、`Result<T>`、`ApiResponse<T>` 包装按 `code`/`data` 生成可审阅响应结构，并在接口 `warnings` 中保留这是源码约定推断的事实。无泛型包装的 `R` 只生成 object 型 `data` 占位，不伪造业务字段。
+JavaDoc 必须先从字段声明中剥离再解析 Java 类型。DTO 字段说明按 `@Schema` / `@Parameter`、`@ApiModelProperty`、`@JsonPropertyDescription`、显式 Bean Validation `message`、字段 JavaDoc、行注释的优先级提取；请求参数树和响应 Schema 使用同一份递归 DTO 元数据。源码完全没有说明时，可根据字段标识生成可读标签，无法可靠翻译时要明确标记“源码或接口契约未提供业务说明，需复核”，不能伪装成已发现的业务语义。枚举声明映射为 `type: "string"` 并保留 `enum`，不能因为字段引用被初始识别为 object 就丢失枚举类型。没有 OpenAPI/Swagger 响应契约时，Spring Mapping 方法的返回类型是次级响应来源：解包 `ResponseEntity<T>`、`Optional<T>` 等容器，递归展开 DTO；常见 `R<T>`、`Result<T>`、`ApiResponse<T>` 包装按 `code`/`data` 生成可审阅响应结构，并在接口 `warnings` 中保留这是源码约定推断的事实。无泛型包装的 `R` 只生成 object 型 `data` 占位，不伪造业务字段。
 
 ### 其他框架与 WebSocket
 

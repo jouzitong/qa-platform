@@ -50,14 +50,14 @@ v1.0.0/
 
 The version directory may use the selected `package_version`. The importer recognizes the basenames `api.json`/`apis.json`, `flow.json`/`flows.json`, and `plans.json`/`test_plans.json` in any directory.
 
-- `manifest.json`: package version, source, architecture evidence, import decision, and warnings.
+- `manifest.json`: package version, source, architecture evidence, project-owned `service_topology`, import decision, and warnings. `service_topology` records service source roots, external route prefixes, directory roots, server facts, and gateway mappings used during scanning; imported APIs already contain the resulting stable path and `group_path`.
 - `project.json`: project name, description, and variables. `variables.base_url` is required and must be an `ip:port` value without `http://`; qa-platform adds the HTTP scheme when resolving it. An explicit gateway address may fill it only as a compatibility fallback.
 - `api_templates.json`: reusable API templates imported before APIs; API `template_key` references resolve against their key/name.
 - `inventory.json`: scanner-only `features` and `test_cases`; current qa-platform warns and skips these because it has no standalone models for them.
 - `flow_documents.json`: configured source-document path, format, hash, size, usage, and structured flow keys. Source prose `content` is local AI context and is stripped before ZIP creation.
 - `assertion_definitions.json`: success condition definitions, including the system status/body/message rules.
 - APIs reference one success condition through `success_assertion_key`.
-- `api.json`: HTTP and WebSocket API assets. API assets reference one success condition when available and retain `success_contract` as a compatibility fallback. The current platform also fills missing HTTP headers with `X-trade-id: {{ random.uuid(32) }}` and `Accept: application/json`.
+- `api.json`: HTTP and WebSocket API assets. API assets preserve the optional canonical `group_path` (for example `/用户服务/用户管理`); the current importer creates any missing directory chain from that path. API assets reference one success condition when available and retain `success_contract` as a compatibility fallback. The current platform also fills missing HTTP headers with `X-trade-id: {{ random.uuid(32) }}` and `Accept: application/json`.
 - `flow.json`: flow assets whose steps reference API keys through `api_key`. Scanner-generated steps are disabled.
 - `plans.json`: versioned plan assets whose items reference APIs or flows through `target_key`. Scanner-generated items are disabled.
 

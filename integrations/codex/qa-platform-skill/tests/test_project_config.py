@@ -66,6 +66,7 @@ class ProjectConfigTests(unittest.TestCase):
             self.assertEqual(config["variables"], {"base_url": "127.0.0.1:9764"})
             self.assertEqual(config["api_templates"], [])
             self.assertEqual(config["api_template_discovery"], {"enabled": True})
+            self.assertEqual(config["service_topology"], {"gateway": {}, "services": []})
             self.assertEqual(config["flow_documents"], [])
             self.assertTrue(config["openapi"]["auto_discover"])
             self.assertFalse(config["openapi"]["runtime_discovery"]["enabled"])
@@ -96,6 +97,48 @@ class ProjectConfigTests(unittest.TestCase):
                 result["interfaces"]["http"][0]["success_assertion_key"],
                 "config:http-success-status",
             )
+
+    def test_service_topology_rejects_unsafe_source_roots_and_route_prefixes(self) -> None:
+        invalid_values = (
+            {
+                "services": [
+                    {
+                        "key": "user",
+                        "source_roots": ["../user"],
+                        "route_prefix": "/user",
+                    }
+                ]
+            },
+            {
+                "services": [
+                    {
+                        "key": "user",
+                        "source_roots": ["app/user"],
+                        "route_prefix": "http://localhost/user",
+                    }
+                ]
+            },
+        )
+        for topology in invalid_values:
+            with self.subTest(topology=topology), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / ".qa-platform.json").write_text(
+                    json.dumps(
+                        {
+                            "variables": {"base_url": "127.0.0.1:9764"},
+                            "service_topology": topology,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                result = subprocess.run(
+                    [sys.executable, str(SCAN), str(root), "--output", str(root / "manifest.json")],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("service_topology", result.stderr)
 
 
 if __name__ == "__main__":
